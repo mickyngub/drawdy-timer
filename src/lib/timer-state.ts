@@ -209,7 +209,7 @@ export function formatRemaining(ms: number): string {
 
 export function clockTime(at: number, format: ClockFormat = {}): string {
     return new Intl.DateTimeFormat(format.locale, {
-        hour: "2-digit",
+        hour: "numeric",
         minute: "2-digit",
         timeZone: format.timeZone,
     }).format(at);

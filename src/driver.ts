@@ -50,6 +50,8 @@ export const ANCHOR_SIZE = { width: 240, height: 140 };
 // Text presentation of U+23F1 is a thin outline in most fonts; the variation selector asks for the emoji.
 export const GLYPH = "⏱️";
 const GLYPH_SIZE = 64;
+// Measured on drawdy.io: Drawdy draws the emoji about 8 units above its text box, so this centres it in the card.
+const GLYPH_TOP = 45;
 const PROPERTIES: SubscribeableKey[] = ["type", "meta", "frameId"];
 // An expiry seen later than this (a throttled background tab) still writes "done" but stays silent.
 const LIVE_EXPIRY_MS = 10_000;
@@ -189,7 +191,7 @@ export function anchorSchemas(
             type: "text",
             drawdyElementId: glyphId,
             x: at.x,
-            y: at.y + (ANCHOR_SIZE.height - GLYPH_SIZE * 1.25) / 2,
+            y: at.y + GLYPH_TOP,
             width: ANCHOR_SIZE.width,
             text: GLYPH,
             fontSize: GLYPH_SIZE,
