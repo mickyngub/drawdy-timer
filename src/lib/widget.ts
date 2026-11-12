@@ -4,7 +4,12 @@ import type {
 } from "@drawdy/driver-protocol";
 import { FACE_HTML } from "../face-html";
 import type { Rect } from "./free-spot";
-import { canReset, PRIMARY_LABEL, primaryAction } from "./panel-model";
+import {
+    canReset,
+    PRIMARY_LABEL,
+    primaryAction,
+    type PrimaryAction,
+} from "./panel-model";
 import { effective, toMeta, type Timer } from "./timer-state";
 
 export const WIDGET_SIZE = { width: 300, height: 210 } as const;
@@ -36,14 +41,19 @@ const ACCENT = "var(--accent-default, #c5f601)";
 const ACCENT_HOVER = "var(--accent-hover, #d4ff2e)";
 const ON_ACCENT = "var(--accent-on-accent, #090909)";
 
+/** What a button shows: the start-or-pause control's state, or one of the other two. */
+export type ButtonSlot = Exclude<PrimaryAction, "add"> | "add-minute" | "reset";
+
+/** A button's id carries its timer and what it shows, the stable hook for tests and tools. */
 export const buttonDomId = (
     driverId: string,
     key: string,
-    action: ButtonAction
-): string => `${driverId}:${key}:${action}`;
+    slot: ButtonSlot
+): string => `${driverId}:${key}:${slot}`;
 
 export type WidgetButton = {
     action: ButtonAction;
+    slot: ButtonSlot;
     label: string;
     primary: boolean;
     enabled: boolean;
@@ -55,18 +65,21 @@ export function widgetButtons(timer: Timer, now: number): WidgetButton[] {
     return [
         {
             action: primary === "pause" ? "pause" : "start",
+            slot: primary,
             label: PRIMARY_LABEL[primary],
             primary: true,
             enabled: true,
         },
         {
             action: "add-minute",
+            slot: "add-minute",
             label: "+1 min",
             primary: false,
             enabled: true,
         },
         {
             action: "reset",
+            slot: "reset",
             label: "Reset",
             primary: false,
             enabled: canReset(e),
@@ -157,7 +170,7 @@ function buttonSchema(
     // click on anything else reaches drivers as a scene click with its point.
     return {
         type: "box",
-        domId: buttonDomId(driverId, key, button.action),
+        domId: buttonDomId(driverId, key, button.slot),
         styles: {
             width: [width, "px"],
             height: [BUTTON_H, "px"],

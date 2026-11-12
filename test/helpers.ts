@@ -7,7 +7,6 @@ import {
     type Timer,
 } from "../src/lib/timer-state";
 import {
-    buttonDomId,
     buttonRect,
     WIDGET_SIZE,
     widgetElement,
@@ -128,6 +127,10 @@ export function bakedOf(srcDoc: string): unknown {
     return JSON.parse(match[1]);
 }
 
+/** What the widget's start-or-pause button shows: "start", "pause", "resume" or "start-again". */
+export const primaryOf = (el: Stored): string =>
+    buttonIdsOf(el)[0]?.split(":").at(-1) ?? "";
+
 /** The ids of the widget's buttons, in order. */
 export const buttonIdsOf = (el: Stored): string[] =>
     nodes(schemaOf(el)).flatMap((n) =>
@@ -143,9 +146,12 @@ export async function press(
     dragBy = 0
 ) {
     const timer = timerOf(el)!;
-    const domId = buttonDomId(DRIVER_ID, timer.id, action);
-    if (!buttonIdsOf(el).includes(domId))
-        throw new Error(`the widget shows no ${action} button`);
+    const slots =
+        action === "start" ? ["start", "resume", "start-again"] : [action];
+    const shown = buttonIdsOf(el).some((id) =>
+        slots.some((slot) => id === `${DRIVER_ID}:${timer.id}:${slot}`)
+    );
+    if (!shown) throw new Error(`the widget shows no ${action} button`);
     const r = buttonRect(rectOf(el), action);
     const at = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
     host.clickAt(at, { x: at.x + dragBy, y: at.y });

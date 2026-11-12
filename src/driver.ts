@@ -69,6 +69,8 @@ const PLACE_PROPERTIES: SubscribeableKey[] = [...PROPERTIES, "groupId"];
 const CLICK_SLOP_PX = 6;
 // A run seen ending later than this (a throttled background tab) stays silent.
 const LIVE_EXPIRY_MS = 10_000;
+// Past this, anyone with Timer writes a finished run's done state in case its presser's tab is gone.
+const FALLBACK_FINISH_MS = 5_000;
 const WAKE_SLACK_MS = 15;
 const PREFS_KEY = "prefs";
 const DEFAULT_SOUND: Sound = "soft";
@@ -117,6 +119,8 @@ type State = {
     timers: Map<string, Placed>;
     glyphs: Map<string, string>;
     moved: Map<string, string>;
+    mine: Set<string>;
+    finished: Set<string>;
     down: Press | null;
     selection: string[];
     target: string | null;
@@ -336,6 +340,8 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
             const timer = kind ? readTimer(raw, el.id) : null;
             if (kind && timer) {
                 const rect = rectOf(el) ?? prev?.rect ?? null;
+                if (timer.state === "done" && timer.endsAt !== undefined)
+                    s.finished.add(expiryKey(timer));
                 if (
                     !prev ||
                     prev.kind !== kind ||
@@ -434,6 +440,42 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
         }
     }
 
+    /** When a running widget's done state is due: at its end for the client that made it, else once the fallback wait has passed. */
+    function finishDue(s: State, entry: Placed): number | null {
+        const { timer } = entry;
+        if (entry.kind !== "widget" || timer.state !== "running") return null;
+        if (timer.endsAt === undefined) return null;
+        if (s.finished.has(expiryKey(timer))) return null;
+        return s.mine.has(entry.el)
+            ? timer.endsAt
+            : timer.endsAt + FALLBACK_FINISH_MS + 1;
+    }
+
+    /**
+     * A widget's buttons can't change once it is on the board, so a finished
+     * run is written as done, which turns Pause into Start again. Each client
+     * writes each run at most once and never one it has seen done, so an undo
+     * of the write isn't undone again.
+     */
+    function processFinishes(s: State, now: number): void {
+        for (const entry of [...s.timers.values()]) {
+            const due = finishDue(s, entry);
+            if (due === null || due > now) continue;
+            const key = expiryKey(entry.timer);
+            s.finished.add(key);
+            const el = entry.el;
+            void enqueue(() => finish(s, el, key));
+        }
+    }
+
+    async function finish(s: State, el: string, key: string): Promise<void> {
+        const entry = s.timers.get(el);
+        if (!entry || entry.kind !== "widget") return;
+        if (entry.timer.state !== "running" || expiryKey(entry.timer) !== key)
+            return;
+        await act(s, el, [{ type: "expire" }]);
+    }
+
     function hudCommand(s: State, command: () => Promise<unknown>): void {
         s.hudChain = s.hudChain.then(command).catch(() => undefined);
     }
@@ -489,8 +531,12 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
         if (s.wake !== null) env.clearTimeout(s.wake);
         s.wake = null;
         const timers = [...s.timers.values()].map((e) => e.timer);
-        const at = nextWake(timers, now, s.flashes);
-        if (at === null) return;
+        let at = nextWake(timers, now, s.flashes) ?? Infinity;
+        for (const entry of s.timers.values()) {
+            const due = finishDue(s, entry);
+            if (due !== null && due > now) at = Math.min(at, due);
+        }
+        if (!Number.isFinite(at)) return;
         s.wake = env.setTimeout(
             () => {
                 s.wake = null;
@@ -503,6 +549,7 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
     function refresh(s: State): void {
         const now = env.now();
         processExpiries(s, now);
+        processFinishes(s, now);
         for (const [id, until] of s.flashes)
             if (until <= now) s.flashes.delete(id);
         renderHud(s, now);
@@ -557,6 +604,7 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
             timer: plan.timer,
             rect: plan.rect,
         });
+        s.mine.add(newId);
         const reselect = plan.remove.some((r) => s.selection.includes(r));
         const removed = await s.issueCommand({
             type: "command:scene:remove-drawdy-elements",
@@ -643,6 +691,7 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
         }
         if (!s.timers.has(id))
             s.timers.set(id, { el: id, kind: "widget", timer, rect: spot });
+        s.mine.add(id);
         s.target = id;
         s.selection = [id];
         refresh(s);
@@ -852,6 +901,8 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
             timers: new Map(),
             glyphs: new Map(),
             moved: new Map(),
+            mine: new Set(),
+            finished: new Set(),
             down: null,
             selection: [],
             target: null,

@@ -11,7 +11,8 @@ import {
     type TimerState,
 } from "./timer-state";
 
-export type PrimaryAction = "add" | "start" | "pause" | "resume" | "restart";
+export type PrimaryAction =
+    "add" | "start" | "pause" | "resume" | "start-again";
 
 export type PanelModel = {
     view: "empty" | "timer";
@@ -32,7 +33,7 @@ export const PRIMARY_LABEL: Record<PrimaryAction, string> = {
     start: "Start",
     pause: "Pause",
     resume: "Resume",
-    restart: "Start again",
+    "start-again": "Start again",
 };
 
 /** The one start-or-pause control, as both the panel and the widget on the board show it. */
@@ -44,7 +45,7 @@ export function primaryAction(
         : state === "paused"
           ? "resume"
           : state === "done"
-            ? "restart"
+            ? "start-again"
             : "start";
 }
 

@@ -42,14 +42,14 @@ test("paused offers Resume and a finished timer offers to start again", () => {
     );
     const done = panelModel(timer, NOW + MINUTE_MS + 1);
     assert.equal(done.state, "done");
-    assert.equal(done.primary, "restart");
+    assert.equal(done.primary, "start-again");
     assert.equal(done.lengthLocked, false);
 });
 
 test("the start or pause control reads the state the same way on the panel and the board", () => {
     assert.deepEqual(
         (["ready", "running", "paused", "done"] as const).map(primaryAction),
-        ["start", "pause", "resume", "restart"]
+        ["start", "pause", "resume", "start-again"]
     );
 });
 

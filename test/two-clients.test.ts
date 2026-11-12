@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { MINUTE_MS } from "../src/lib/timer-state";
+import { MINUTE_MS, newTimer, reduce } from "../src/lib/timer-state";
 import {
     act,
     bakedOf,
@@ -16,7 +16,10 @@ import {
     onlyTimer,
     onlyWidget,
     press,
+    primaryOf,
+    seededWidget,
     srcDocOf,
+    START,
     timerOf,
     widgets,
     writes,
@@ -108,7 +111,7 @@ test("presses that cross on the wire leave two stacked widgets until the next pr
     assert.equal(onlyTimer(a).state, "ready");
 });
 
-test("at the end each screen chimes once and nobody writes, even with B's clock 1.5 s behind", async () => {
+test("at zero A, who pressed Start, writes the finished state, B writes nothing, and both end with one done widget offering Start again", async () => {
     const { a, b, settle, advance } = await pair(-1500);
     await act(
         a,
@@ -131,8 +134,42 @@ test("at the end each screen chimes once and nobody writes, even with B's clock 
     await advance(30_000);
     assert.equal(chimes(a).length, 1);
     assert.equal(chimes(b).length, 1);
-    assert.deepEqual(writes(a), []);
+    assert.deepEqual(writes(a), ["add", "remove"]);
     assert.deepEqual(writes(b), []);
+    sameSingleWidget(a, b);
+    assert.equal(onlyTimer(b).state, "done");
+    assert.equal(primaryOf(onlyWidget(b)), "start-again");
+});
+
+test("when the presser's screen is gone the others write the finished state 5 s after zero, and two that cross leave identical twins the next press clears", async () => {
+    const clock = fakeClock();
+    const board = fakeBoard();
+    const run = reduce(newTimer("w1", 1), { type: "start" }, START - 30_000);
+    const b = await client(clock, { board, seed: [seededWidget("w1", run)] });
+    const c = await client(clock, { board });
+    const settle = () => board.settle();
+    await clock.advance(30_000 + 4_000, settle);
+    assert.deepEqual(writes(b), []);
+    assert.deepEqual(writes(c), []);
+
+    board.hold();
+    await clock.advance(2_000, settle);
+    board.release();
+    await settle();
+    for (const host of [b, c]) {
+        assert.deepEqual(writes(host), ["add", "remove"]);
+        const twins = widgets(host);
+        assert.equal(twins.length, 2);
+        assert.deepEqual(twins.map(primaryOf), ["start-again", "start-again"]);
+        assert.equal(srcDocOf(twins[0]), srcDocOf(twins[1]));
+        assert.deepEqual(twins[0].meta, twins[1].meta);
+    }
+
+    await clock.advance(60_000, settle);
+    assert.deepEqual(writes(b), ["add", "remove"]);
+    await press(b, settle, widgets(b)[0], "reset");
+    sameSingleWidget(b, c);
+    assert.equal(onlyTimer(c).state, "ready");
 });
 
 test("whoever presses +1 min on a finished timer runs it again for everyone", async () => {

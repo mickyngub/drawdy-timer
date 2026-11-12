@@ -66,6 +66,15 @@ test("at its end a run reads as done with an empty ring, flashes for five second
     assert.equal(faceAt(timer, end + 3_600_000).state, "done");
 });
 
+test("a done state written at zero carries on the pulse that began at zero instead of starting one of its own", () => {
+    const end = NOW + MINUTE_MS;
+    const done = reduce(running(1), { type: "expire" }, end + 20);
+    assert.equal(done.state, "done");
+    assert.equal(faceAt(done, end + 2_000).flash, true);
+    assert.equal(faceAt(done, end + FLASH_MS).flash, false);
+    assert.equal(faceAt(done, end + 60_000).flash, false);
+});
+
 test("a timer stored as done after its moment passed shows time's up without a flash", () => {
     const done = reduce(running(1), { type: "pause" }, NOW + 2 * MINUTE_MS);
     assert.equal(done.state, "done");

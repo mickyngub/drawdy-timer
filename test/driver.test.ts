@@ -22,6 +22,7 @@ import {
     onlyTimer,
     onlyWidget,
     press,
+    primaryOf,
     rectOf,
     removes,
     seededWidget,
@@ -283,7 +284,7 @@ test("the pill changes only when the shown second does", async () => {
     assert.equal(hudTime(host), "4:49");
 });
 
-test("at the end nobody writes anything, the screen chimes once, and the pill reads time's up for 5 seconds", async () => {
+test("at zero the presser's screen writes the finished state once, so the widget offers Start again, and the pill reads time's up for 5 seconds", async () => {
     const { host, settle, advance } = await solo();
     const widget = await addTimer(host, settle);
     await act(
@@ -297,8 +298,15 @@ test("at the end nobody writes anything, the screen chimes once, and the pill re
     await settle();
     host.clear();
 
-    await advance(MINUTE_MS + 20);
+    await advance(MINUTE_MS - 1_000);
     assert.deepEqual(writes(host), []);
+    await advance(1_020);
+    assert.deepEqual(writes(host), ["add", "remove"]);
+    const done = onlyWidget(host);
+    assert.equal(onlyTimer(host).state, "done");
+    assert.equal(onlyTimer(host).endsAt, START + MINUTE_MS);
+    assert.equal(primaryOf(done), "start-again");
+    assert.deepEqual(bakedOf(srcDocOf(done)), toMeta(onlyTimer(host)));
     assert.equal(chimes(host).length, 1);
     assert.deepEqual(chimes(host)[0], { type: "chime", sound: "soft" });
     assert.equal(hudKind(host), "done");
@@ -308,11 +316,34 @@ test("at the end nobody writes anything, the screen chimes once, and the pill re
     await advance(1_100);
     assert.equal(host.floating.has(HUD_ID), false);
     await advance(60_000);
-    assert.deepEqual(writes(host), []);
+    assert.deepEqual(writes(host), ["add", "remove"]);
     assert.equal(chimes(host).length, 1);
 });
 
-test("pressing Pause on a run that has ended settles the widget as done, and Start then runs it again", async () => {
+test("pausing or resetting before zero cancels the finish write", async () => {
+    for (const action of ["pause", "reset"] as const) {
+        const { host, settle, advance } = await solo();
+        const widget = await addTimer(host, settle);
+        await act(
+            host,
+            settle,
+            widget.id,
+            { type: "set-duration", minutes: 1 },
+            { type: "start" }
+        );
+        await advance(30_000);
+        await press(host, settle, onlyWidget(host), action);
+        host.clear();
+        await advance(2 * MINUTE_MS);
+        assert.deepEqual(writes(host), [], action);
+        assert.equal(
+            primaryOf(onlyWidget(host)),
+            action === "pause" ? "resume" : "start"
+        );
+    }
+});
+
+test("undoing the finish write brings Pause back without it being written again", async () => {
     const { host, settle, advance } = await solo();
     const widget = await addTimer(host, settle);
     await act(
@@ -322,18 +353,37 @@ test("pressing Pause on a run that has ended settles the widget as done, and Sta
         { type: "set-duration", minutes: 1 },
         { type: "start" }
     );
-    await advance(MINUTE_MS + 2_000);
+    const running = structuredClone(onlyWidget(host));
+    await advance(MINUTE_MS + 20);
+    const done = onlyWidget(host);
+    host.restore(running);
+    host.board.write(host.board.clients[0], done.id, null);
+    await settle();
+    host.clear();
+    await advance(30_000);
+    assert.deepEqual(writes(host), []);
+    assert.equal(primaryOf(onlyWidget(host)), "pause");
+});
+
+test("pressing Pause on someone else's run that has just ended settles it as done, and Start runs it again", async () => {
+    const run = reduce(
+        newTimer("w1", 1),
+        { type: "start" },
+        START - MINUTE_MS + 1_000
+    );
+    const { host, settle, advance } = await solo({
+        seed: [seededWidget("w1", run)],
+    });
+    await advance(2_000);
+    assert.equal(primaryOf(onlyWidget(host)), "pause");
     await press(host, settle, onlyWidget(host), "pause");
     assert.equal(onlyTimer(host).state, "done");
     const settled = onlyWidget(host);
-    assert.equal(
-        buttonIdsOf(settled)[0],
-        `${DRIVER_ID}:${onlyTimer(host).id}:start`
-    );
+    assert.equal(primaryOf(settled), "start-again");
 
     await press(host, settle, settled, "start");
     assert.equal(onlyTimer(host).state, "running");
-    assert.equal(onlyTimer(host).endsAt, START + MINUTE_MS + 2_000 + MINUTE_MS);
+    assert.equal(onlyTimer(host).endsAt, START + 2_000 + MINUTE_MS);
 });
 
 test("with sound off there is no chime, and the choice is kept on this device", async () => {
@@ -507,7 +557,7 @@ test("a press lands on the widget clicked when a pasted copy shares its timer, a
     assert.equal(widgets(host).length, 2);
 });
 
-test("a board opened after its timer ran out stays quiet and writes nothing", async () => {
+test("a board opened after its timer ran out stays quiet and writes the finished state once", async () => {
     const expired = reduce(
         newTimer("t1", 1),
         { type: "start" },
@@ -518,12 +568,37 @@ test("a board opened after its timer ran out stays quiet and writes nothing", as
         viewport: OFF_SCREEN,
     });
     await advance(10_000);
-    assert.deepEqual(writes(host), []);
+    assert.deepEqual(writes(host), ["add", "remove"]);
+    assert.equal(onlyTimer(host).state, "done");
+    assert.equal(primaryOf(onlyWidget(host)), "start-again");
     assert.equal(chimes(host).length, 0);
     assert.equal(host.floating.has(HUD_ID), false);
+    await advance(MINUTE_MS);
+    assert.deepEqual(writes(host), ["add", "remove"]);
 });
 
-test("a board opened mid-run shows the pill for a widget out of view and chimes at the end, writing nothing", async () => {
+test("a run someone else pressed is written as finished 5 s after zero, once per screen", async () => {
+    const run = reduce(newTimer("w1", 1), { type: "start" }, START - 30_000);
+    const { host, settle, advance } = await solo({
+        seed: [seededWidget("w1", run)],
+    });
+    const running = structuredClone(onlyWidget(host));
+    await advance(30_000 + 4_900);
+    assert.deepEqual(writes(host), []);
+    await advance(200);
+    assert.deepEqual(writes(host), ["add", "remove"]);
+    const done = onlyWidget(host);
+    assert.equal(primaryOf(done), "start-again");
+
+    host.restore(running);
+    host.board.write(host.board.clients[0], done.id, null);
+    await settle();
+    assert.equal(primaryOf(onlyWidget(host)), "pause");
+    await advance(60_000);
+    assert.deepEqual(writes(host), ["add", "remove"]);
+});
+
+test("a board opened mid-run shows the pill for a widget out of view, chimes at the end, and writes only the fallback", async () => {
     const running = reduce(
         newTimer("t1", 1),
         { type: "start" },
@@ -537,6 +612,9 @@ test("a board opened mid-run shows the pill for a widget out of view and chimes 
     await advance(30_100);
     assert.equal(chimes(host).length, 1);
     assert.deepEqual(writes(host), []);
+    await advance(5_000);
+    assert.deepEqual(writes(host), ["add", "remove"]);
+    assert.equal(chimes(host).length, 1);
 });
 
 test("a theme change reaches the panel and redraws the pill, and a resize recentres it", async () => {

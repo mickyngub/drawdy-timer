@@ -7,6 +7,7 @@ The timer is now a widget on the board that everyone sees ticking, with or witho
 - the widget shows big digits, a ring that drains as time runs, the label and the state, and counts down on every screen from the same end time
 - Start, Pause or Resume, +1 min and Reset sit on the widget; pressing one needs Timer, so people without it watch the countdown
 - in the last 10 seconds the ring and digits turn amber and pulse gently; at zero it reads "Time's up", pulses for 5 seconds, then holds
+- at zero the first button turns from Pause to Start again: the screen of whoever last pressed writes the finished timer, which adds 2 undo steps for them, and anyone else with Timer writes it 5 seconds later if that screen is closed
 - the widget follows the board's light or dark theme on each screen
 - the countdown pill now shows only while the running timer is off screen or too small to read
 - each press swaps the widget for a new one, so undoing a press takes two steps

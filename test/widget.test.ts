@@ -11,7 +11,6 @@ import {
     type Timer,
 } from "../src/lib/timer-state";
 import {
-    BUTTON_ACTIONS,
     buttonAt,
     buttonDomId,
     buttonRect,
@@ -65,7 +64,7 @@ test("the start or pause button follows the state, and reset rests while there i
         [ready, NOW, "start", PRIMARY_LABEL.start, false],
         [run, NOW + 1000, "pause", PRIMARY_LABEL.pause, true],
         [paused, NOW + 2000, "start", PRIMARY_LABEL.resume, true],
-        [run, NOW + 5 * MINUTE_MS, "start", PRIMARY_LABEL.restart, true],
+        [run, NOW + 5 * MINUTE_MS, "start", PRIMARY_LABEL["start-again"], true],
     ];
     for (const [timer, now, action, label, resettable] of cases) {
         const [primary, addMinute, reset] = widgetButtons(timer, now);
@@ -89,8 +88,8 @@ test("the widget is the labelled face over a row of buttons whose ids name the t
     const buttons = nodes(row).filter((n) => n.domId !== undefined);
     assert.deepEqual(
         buttons.map((b) => b.domId),
-        ["pause", "add-minute", "reset"].map((a) =>
-            buttonDomId(D, timer.id, a as (typeof BUTTON_ACTIONS)[number])
+        (["pause", "add-minute", "reset"] as const).map((slot) =>
+            buttonDomId(D, timer.id, slot)
         )
     );
     assert.ok(
