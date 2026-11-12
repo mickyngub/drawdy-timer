@@ -1,0 +1,29 @@
+@layer theme, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@source "./shell.ts";
+
+@custom-variant paused (&:is([data-state="paused"] *));
+@custom-variant done (&:is([data-state="done"] *));
+@custom-variant urgent (&:is([data-urgent] *));
+@custom-variant flash (&:is([data-flash] *));
+@custom-variant long (&:is([data-long] *));
+
+/* light-dark() follows the viewer's colour scheme, which the page opts into with its color-scheme meta. */
+@theme {
+    --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+    --color-paper: light-dark(#ffffff, #1f1f23);
+    --color-ink: light-dark(rgb(0 0 0 / 0.95), rgb(255 255 255 / 0.95));
+    --color-ink-muted: light-dark(rgb(0 0 0 / 0.6), rgb(255 255 255 / 0.65));
+    --color-ink-faint: light-dark(rgb(0 0 0 / 0.28), rgb(255 255 255 / 0.3));
+    --color-track: light-dark(rgb(0 0 0 / 0.08), rgb(255 255 255 / 0.1));
+    --color-go: light-dark(#6a9a00, #c5f601);
+    --color-warn: light-dark(#b77c00, #eab308);
+
+    --animate-beat: beat 1s ease-in-out infinite;
+    @keyframes beat {
+        50% {
+            opacity: 0.45;
+        }
+    }
+}

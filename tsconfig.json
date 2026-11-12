@@ -13,6 +13,7 @@
     "include": [
         "src",
         "webview",
+        "face",
         "test",
         "bundle.ts",
         "vite.config.ts",
