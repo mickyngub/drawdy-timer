@@ -149,6 +149,7 @@ export type FakeBoard = ReturnType<typeof fakeBoard>;
 type Options = {
     board?: FakeBoard;
     viewport?: Rect;
+    zoom?: number;
     window?: { width: number; height: number };
     kv?: Map<string, Record<string, unknown>>;
     denied?: string[];
@@ -188,12 +189,14 @@ function normalize(el: any): Stored {
 
 export function fakeHost(options: Options = {}) {
     const board = options.board ?? fakeBoard();
-    const viewport = options.viewport ?? {
+    let viewport = options.viewport ?? {
         x: 0,
         y: 0,
         width: 1600,
         height: 1000,
     };
+    let zoom = options.zoom ?? 1;
+    const listening = new Set<string>();
     const windowSize = options.window ?? { width: 1280, height: 800 };
     const kv = options.kv ?? new Map<string, Record<string, unknown>>();
     const sent: { type: string; req?: any }[] = [];
@@ -292,7 +295,12 @@ export function fakeHost(options: Options = {}) {
             case "command:camera:get-viewport-rect":
                 return ok({ rect: viewport });
             case "command:camera:get-info":
-                return ok({ x: 0, y: 0, zoom: 1 });
+                return ok({ x: 0, y: 0, zoom });
+            case "command:camera:screen-to-canvas":
+                return ok({
+                    x: viewport.x + req.x / zoom,
+                    y: viewport.y + req.y / zoom,
+                });
             case "command:scene:get-drawdy-elements": {
                 const wanted: string[] | undefined = req.drawdyElementIds;
                 const els = wanted
@@ -369,6 +377,8 @@ export function fakeHost(options: Options = {}) {
                     elementProperties.length === 0
                 )
                     elementProperties.push(...req.properties);
+                if (cmd.type.startsWith("subscription:"))
+                    listening.add(cmd.type);
                 return ok(
                     cmd.type.startsWith("subscription:")
                         ? { subscriptionId: cmd.type }
@@ -419,7 +429,56 @@ export function fakeHost(options: Options = {}) {
         clickButton: () =>
             push("subscription:dom:element-clicked", {
                 domElementId: "mickyngub.timer:action-button",
+                clientX: 0,
+                clientY: 0,
             }),
+        /**
+         * A press and release on the board with the select tool, as Drawdy
+         * reports it: the pointer down, the element under it selected, then
+         * a click on whatever is under both points. `to` drags in between.
+         */
+        clickAt(at: { x: number; y: number }, to = at) {
+            const under = (p: { x: number; y: number }) =>
+                live()
+                    .filter((el) =>
+                        overlaps(rectOf(el), { ...p, width: 0, height: 0 })
+                    )
+                    .map((el) => el.id);
+            const cursor = (p: { x: number; y: number }) => ({
+                canvasSpace: p,
+                domSpace: {
+                    x: (p.x - viewport.x) * zoom,
+                    y: (p.y - viewport.y) * zoom,
+                },
+            });
+            const down = under(at);
+            if (listening.has("subscription:scene:pointer"))
+                push("subscription:scene:pointer", {
+                    type: "down",
+                    drawdyElementIds: down,
+                    pressure: 0.5,
+                    cursor: cursor(at),
+                });
+            if (down.length) select([down.at(-1)!]);
+            const up = new Set(under(to));
+            const clicked = down.filter((id) => up.has(id));
+            if (clicked.length && listening.has("subscription:scene:click"))
+                push("subscription:scene:click", {
+                    drawdyElementIds: clicked,
+                    cursor: cursor(to),
+                });
+        },
+        viewport: () => ({ rect: viewport, zoom }),
+        /** Moves the camera, then reports it once it settles. */
+        pan(rect: Rect, nextZoom = zoom) {
+            viewport = rect;
+            zoom = nextZoom;
+            push("subscription:camera:moved-debounced", {
+                x: -rect.x * zoom,
+                y: -rect.y * zoom,
+                zoom,
+            });
+        },
         message: (message: Record<string, unknown>) =>
             push("subscription:webview:message", {
                 webviewDomId: "mickyngub.timer:webview",

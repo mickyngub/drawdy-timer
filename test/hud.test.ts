@@ -5,7 +5,9 @@ import {
     HUD_WIDTH,
     hudPosition,
     hudSchema,
+    MIN_READABLE_PX,
     nextWake,
+    onScreen,
     pickHud,
 } from "../src/lib/hud";
 import {
@@ -19,7 +21,7 @@ const NOW = Date.UTC(2026, 10, 12, 14, 0, 0);
 const NONE = new Map<string, number>();
 
 const running = (id: string, minutes: number, at = NOW, label = ""): Timer =>
-    reduce(newTimer(id, minutes, label), { type: "start", by: "a" }, at);
+    reduce(newTimer(id, minutes, label), { type: "start" }, at);
 
 function find(
     schema: DomElementSchema,
@@ -43,6 +45,23 @@ const textOf = (schema: DomElementSchema | null): string =>
             ? (schema.children ?? []).map(textOf).join("")
             : "";
 
+test("a widget is on screen when at least half of it shows and it is big enough to read", () => {
+    const view = { rect: { x: 0, y: 0, width: 1600, height: 1000 }, zoom: 1 };
+    const widget = { x: 100, y: 100, width: 300, height: 210 };
+    assert.equal(onScreen(widget, view), true);
+    assert.equal(onScreen({ ...widget, x: 1450 }, view), true);
+    assert.equal(onScreen({ ...widget, x: 1460 }, view), false);
+    assert.equal(onScreen({ ...widget, y: 5000 }, view), false);
+    const far = { ...view, zoom: (MIN_READABLE_PX - 1) / 300 };
+    assert.equal(onScreen(widget, far), false);
+    assert.equal(
+        onScreen(widget, { ...view, zoom: MIN_READABLE_PX / 300 }),
+        true
+    );
+    assert.equal(onScreen(null, view), false);
+    assert.equal(onScreen(widget, null), false);
+});
+
 test("no pill while every timer is ready", () => {
     assert.equal(pickHud([newTimer("a"), newTimer("b")], NOW, NONE), null);
 });
@@ -62,14 +81,9 @@ test("with several running, the pill shows the one ending soonest", () => {
     assert.equal(view?.kind === "running" && view.time, "2:59");
 });
 
-test("a paused timer shows while nothing runs, and a running one wins over it", () => {
+test("a paused timer gets no pill; a running one does", () => {
     const paused = reduce(running("p", 5), { type: "pause" }, NOW + 30_000);
-    assert.deepEqual(pickHud([paused], NOW + 40_000, NONE), {
-        kind: "paused",
-        id: "p",
-        time: "4:30",
-        label: "",
-    });
+    assert.equal(pickHud([paused], NOW + 40_000, NONE), null);
     assert.equal(
         pickHud([paused, running("r", 9)], NOW + 40_000, NONE)?.id,
         "r"
@@ -97,11 +111,7 @@ test("time's up takes the pill for its five seconds, then the next running timer
 
 test("a timer restarted during its time's up moment shows its new run", () => {
     const ended = reduce(running("t", 1), { type: "expire" }, NOW + MINUTE_MS);
-    const again = reduce(
-        ended,
-        { type: "add-minute", by: "b" },
-        NOW + MINUTE_MS + 1000
-    );
+    const again = reduce(ended, { type: "add-minute" }, NOW + MINUTE_MS + 1000);
     const flashes = new Map([["t", NOW + MINUTE_MS + 5000]]);
     assert.equal(
         pickHud([again], NOW + MINUTE_MS + 1500, flashes)?.kind,

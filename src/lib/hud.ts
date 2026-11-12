@@ -1,13 +1,15 @@
 import type { DomElementSchema } from "@drawdy/driver-protocol";
+import { URGENT_SECONDS } from "./face";
+import type { Rect } from "./free-spot";
 import { effective, formatRemaining, type Timer } from "./timer-state";
 
-export const FLASH_MS = 5_000;
-export const URGENT_SECONDS = 10;
 export const HUD_WIDTH = 560;
 export const HUD_HEIGHT = 40;
 // Below Drawdy's 64 px top toolbar.
 export const HUD_TOP = 76;
 const MAX_HUD_LABEL = 28;
+// Below this many screen pixels across, a widget's digits are too small to read, so the pill stands in.
+export const MIN_READABLE_PX = 120;
 
 export type HudView =
     | {
@@ -18,17 +20,31 @@ export type HudView =
           urgent: boolean;
           pulse: boolean;
       }
-    | { kind: "paused"; id: string; time: string; label: string }
     | { kind: "done"; id: string; label: string };
 
 export type Theme = "light" | "dark";
 
+/** The visible part of the board in canvas units, and the zoom it is drawn at. */
+export type View = { rect: Rect; zoom: number };
+
+/** A widget counts as on screen when at least half of it is visible and it is big enough to read. */
+export function onScreen(rect: Rect | null, view: View | null): boolean {
+    if (!rect || !view || rect.width <= 0 || rect.height <= 0) return false;
+    const v = view.rect;
+    const w =
+        Math.min(rect.x + rect.width, v.x + v.width) - Math.max(rect.x, v.x);
+    const h =
+        Math.min(rect.y + rect.height, v.y + v.height) - Math.max(rect.y, v.y);
+    if (w <= 0 || h <= 0) return false;
+    return (
+        (w * h) / (rect.width * rect.height) >= 0.5 &&
+        rect.width * view.zoom >= MIN_READABLE_PX
+    );
+}
+
 const secondsLeft = (ms: number): number => Math.max(0, Math.ceil(ms / 1000));
 
-/**
- * One pill for the whole board: a "Time's up" moment wins for its 5 seconds,
- * then the running timer that ends soonest, then the latest paused one.
- */
+/** One pill for the whole board: a "Time's up" moment wins for its 5 seconds, then the running timer that ends soonest. */
 export function pickHud(
     timers: Iterable<Timer>,
     now: number,
@@ -36,7 +52,6 @@ export function pickHud(
 ): HudView | null {
     let flash: { timer: Timer; until: number } | null = null;
     let running: Timer | null = null;
-    let paused: Timer | null = null;
     for (const timer of timers) {
         const e = effective(timer, now);
         const until = flashes.get(e.id);
@@ -47,8 +62,6 @@ export function pickHud(
             const best = running?.endsAt ?? Infinity;
             if (ends < best || (ends === best && e.id < (running?.id ?? "")))
                 running = e;
-        } else if (e.state === "paused") {
-            paused = e;
         }
     }
     if (flash)
@@ -63,14 +76,6 @@ export function pickHud(
             label: running.label,
             urgent,
             pulse: urgent && left % 2 === 1,
-        };
-    }
-    if (paused) {
-        return {
-            kind: "paused",
-            id: paused.id,
-            time: formatRemaining(paused.remainingMs),
-            label: paused.label,
         };
     }
     return null;
@@ -105,7 +110,6 @@ export function hudPosition(windowWidth: number): { x: number; y: number } {
 
 const ICON_PATHS = {
     timer: "M17.6177 5.9681L19.0711 4.51472L20.4853 5.92893L19.0319 7.38231C20.2635 8.92199 21 10.875 21 13C21 17.9706 16.9706 22 12 22C7.02944 22 3 17.9706 3 13C3 8.02944 7.02944 4 12 4C14.125 4 16.078 4.73647 17.6177 5.9681ZM12 20C15.866 20 19 16.866 19 13C19 9.13401 15.866 6 12 6C8.13401 6 5 9.13401 5 13C5 16.866 8.13401 20 12 20ZM11 8H13V14H11V8ZM8 1H16V3H8V1Z",
-    pause: "M6 5H8V19H6V5ZM16 5H18V19H16V5Z",
     check: "M9.9997 15.1709L19.1921 5.97852L20.6063 7.39273L9.9997 17.9993L3.63574 11.6354L5.04996 10.2212L9.9997 15.1709Z",
 } as const;
 
@@ -214,28 +218,11 @@ export function hudSchema(
                   },
               ]
             : [
-                  iconSchema(
-                      view.kind === "paused"
-                          ? ICON_PATHS.pause
-                          : ICON_PATHS.timer,
-                      theme
-                  ),
-                  timeSchema(
-                      driverId,
-                      view.time,
-                      view.kind === "paused"
-                          ? TEXT_MUTED
-                          : view.urgent
-                            ? WARNING
-                            : TEXT
-                  ),
+                  iconSchema(ICON_PATHS.timer, theme),
+                  timeSchema(driverId, view.time, view.urgent ? WARNING : TEXT),
               ];
     const fill =
-        view.kind === "done"
-            ? DONE_FILL
-            : view.kind === "running" && view.pulse
-              ? PULSE_FILL
-              : PANEL;
+        view.kind === "done" ? DONE_FILL : view.pulse ? PULSE_FILL : PANEL;
     return {
         type: "row",
         domId: `${driverId}:hud`,

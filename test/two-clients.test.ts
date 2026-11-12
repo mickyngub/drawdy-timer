@@ -3,17 +3,25 @@ import { test } from "node:test";
 import { MINUTE_MS } from "../src/lib/timer-state";
 import {
     act,
+    bakedOf,
     chimes,
     client,
-    DRIVER_ID,
     fakeBoard,
     fakeClock,
     HUD_ID,
-    hudText,
+    hudKind,
+    hudTime,
     lastState,
+    OFF_SCREEN,
     onlyTimer,
-    updates,
+    onlyWidget,
+    press,
+    srcDocOf,
+    timerOf,
+    widgets,
+    writes,
 } from "./helpers";
+import type { FakeHost } from "./fake-host";
 
 async function pair(skewMs = 0) {
     const clock = fakeClock();
@@ -24,124 +32,152 @@ async function pair(skewMs = 0) {
     const advance = (ms: number) => clock.advance(ms, settle);
     a.clickButton();
     await settle();
-    const { id } = onlyTimer(a);
-    return { clock, board, a, b, id, settle, advance };
+    return { clock, board, a, b, settle, advance };
 }
 
-const doneWrites = (host: Parameters<typeof updates>[0]) =>
-    updates(host).filter(
-        (u) => u.req.updates[0].properties.meta[DRIVER_ID].state === "done"
-    ).length;
+/** Both screens hold exactly one widget, with the same element, meta and face. */
+function sameSingleWidget(a: FakeHost, b: FakeHost) {
+    const [wa, wb] = [onlyWidget(a), onlyWidget(b)];
+    assert.equal(wa.id, wb.id);
+    assert.deepEqual(wa.meta, wb.meta);
+    assert.equal(srcDocOf(wa), srcDocOf(wb));
+    assert.deepEqual(bakedOf(srcDocOf(wa)), Object.values(wa.meta!)[0]);
+}
 
-test("a timer one person adds shows up for the other", async () => {
-    const { b, id } = await pair();
-    assert.equal(onlyTimer(b).id, id);
-    b.message({ type: "ready" });
-    assert.equal(b.floating.has(HUD_ID), false);
+test("a widget one person adds shows up for the other, whose screen can press it", async () => {
+    const { a, b, settle } = await pair();
+    sameSingleWidget(a, b);
+    await press(b, settle, onlyWidget(b), "start");
+    assert.equal(onlyTimer(a).state, "running");
+    sameSingleWidget(a, b);
 });
 
-test("A starts, B pauses, and both show the same paused time", async () => {
-    const { a, b, id, settle, advance } = await pair();
-    await act(a, settle, id, { type: "start" });
-    assert.equal(hudText(a), "5:00");
-    assert.equal(hudText(b), "5:00");
+test("A starts, B pauses, and both end with exactly one widget whose meta and face match", async () => {
+    const { a, b, settle, advance } = await pair();
+    await press(a, settle, onlyWidget(a), "start");
+    sameSingleWidget(a, b);
+    assert.equal(onlyTimer(b).state, "running");
 
     await advance(30_100);
-    assert.equal(hudText(a), "4:30");
-    assert.equal(hudText(b), "4:30");
-
-    await act(b, settle, id, { type: "pause" });
+    await press(b, settle, onlyWidget(b), "pause");
     await advance(10_000);
+    sameSingleWidget(a, b);
     for (const host of [a, b]) {
         assert.equal(onlyTimer(host).state, "paused");
-        assert.equal(hudText(host), "4:30");
-        assert.equal(host.element(id)?.frameName, "⏸ Paused · 4:30 left");
+        assert.equal(onlyTimer(host).remainingMs, 269_900);
         assert.equal(lastState(host)?.timer?.state, "paused");
     }
-    assert.deepEqual(onlyTimer(a), onlyTimer(b));
+    assert.deepEqual(writes(b), ["add", "remove"]);
 });
 
-test("writes that cross on the wire end as the later whole write on both screens", async () => {
-    const { board, a, b, id, settle, advance } = await pair();
-    await act(a, settle, id, { type: "start" });
+test("the other screen's panel stays on its timer while someone else's presses replace the widget", async () => {
+    const { a, b, settle } = await pair();
+    const first = onlyWidget(a);
+    b.select([first.id]);
+    await settle();
+    b.select([]);
+    await settle();
+    assert.equal(lastState(b)?.timer?.id, first.id);
+
+    await press(a, settle, first, "start");
+    a.message({ type: "add" });
+    await settle();
+    assert.equal(widgets(b).length, 2);
+    const replaced = widgets(b).find(
+        (w) => timerOf(w)?.id === timerOf(first)?.id
+    )!;
+    assert.equal(lastState(b)?.timer?.id, replaced.id);
+    assert.equal(lastState(b)?.timer?.state, "running");
+});
+
+test("presses that cross on the wire leave two stacked widgets until the next press, which leaves one", async () => {
+    const { board, a, b, settle, advance } = await pair();
+    await press(a, settle, onlyWidget(a), "start");
     await advance(10_000);
 
     board.hold();
-    await act(a, settle, id, { type: "pause" });
-    await act(b, settle, id, { type: "add-minute" });
-    assert.equal(onlyTimer(a).state, "paused");
-    assert.equal(onlyTimer(b).state, "running");
-
+    await press(a, settle, onlyWidget(a), "pause");
+    await press(b, settle, onlyWidget(b), "add-minute");
     board.release();
     await settle();
-    assert.deepEqual(onlyTimer(a), onlyTimer(b));
-    assert.equal(onlyTimer(a).state, "running");
-    assert.equal(hudText(a), "5:50");
-    assert.equal(hudText(b), "5:50");
-    assert.equal(a.element(id)?.frameName, b.element(id)?.frameName);
+    assert.equal(widgets(a).length, 2);
+    assert.equal(widgets(b).length, 2);
+
+    await press(a, settle, widgets(a)[0], "reset");
+    sameSingleWidget(a, b);
+    assert.equal(onlyTimer(a).state, "ready");
 });
 
-test("only the device that started the run writes time's up, and each screen chimes once even with its clock 1.5 s behind", async () => {
-    const { a, b, id, settle, advance } = await pair(-1500);
+test("at the end each screen chimes once and nobody writes, even with B's clock 1.5 s behind", async () => {
+    const { a, b, settle, advance } = await pair(-1500);
     await act(
         a,
         settle,
-        id,
+        onlyWidget(a).id,
         { type: "set-duration", minutes: 1 },
         { type: "start" }
     );
+    a.pan(OFF_SCREEN);
+    b.pan(OFF_SCREEN);
+    await settle();
+    a.clear();
+    b.clear();
 
     await advance(MINUTE_MS + 20);
-    assert.equal(doneWrites(a), 1);
-    assert.equal(doneWrites(b), 0);
-    assert.equal(onlyTimer(b).state, "done");
-    assert.equal(hudText(a), "Time's up");
-    assert.equal(hudText(b), "Time's up");
+    assert.equal(hudKind(a), "done");
+    await advance(1_500);
+    assert.equal(hudKind(b), "done");
 
     await advance(30_000);
     assert.equal(chimes(a).length, 1);
     assert.equal(chimes(b).length, 1);
-    assert.equal(doneWrites(a), 1);
-    assert.equal(updates(b).length, 0);
+    assert.deepEqual(writes(a), []);
+    assert.deepEqual(writes(b), []);
 });
 
-test("whoever restarts a finished timer becomes the one who writes its end", async () => {
-    const { a, b, id, settle, advance } = await pair();
+test("whoever presses +1 min on a finished timer runs it again for everyone", async () => {
+    const { a, b, settle, advance } = await pair();
     await act(
         a,
         settle,
-        id,
+        onlyWidget(a).id,
         { type: "set-duration", minutes: 1 },
         { type: "start" }
     );
     await advance(MINUTE_MS + 20);
-    await act(b, settle, id, { type: "add-minute" });
+    await press(b, settle, onlyWidget(b), "add-minute");
+    sameSingleWidget(a, b);
+    assert.equal(onlyTimer(a).state, "running");
 
     await advance(MINUTE_MS + 20);
-    assert.equal(doneWrites(a), 1);
-    assert.equal(doneWrites(b), 1);
     assert.equal(chimes(a).length, 2);
     assert.equal(chimes(b).length, 2);
 });
 
 test("an undo on one screen reaches the other", async () => {
-    const { a, b, id, settle } = await pair();
-    const ready = structuredClone(a.element(id)!);
-    await act(a, settle, id, { type: "start" });
-    assert.ok(b.floating.has(HUD_ID));
+    const { a, b, settle } = await pair();
+    const ready = structuredClone(onlyWidget(a));
+    await press(a, settle, ready, "start");
+    const running = structuredClone(onlyWidget(a));
+    b.pan(OFF_SCREEN);
+    await settle();
+    assert.equal(hudTime(b), "5:00");
 
     a.restore(ready);
+    a.board.write(a.board.clients[0], running.id, null);
     await settle();
     assert.equal(onlyTimer(b).state, "ready");
     assert.equal(b.floating.has(HUD_ID), false);
 });
 
-test("deleting the card on one screen clears the pill on the other", async () => {
-    const { a, b, id, settle } = await pair();
-    await act(a, settle, id, { type: "start" });
-    b.message({ type: "delete", id });
+test("deleting the widget on one screen clears the pill on the other", async () => {
+    const { a, b, settle } = await pair();
+    await press(a, settle, onlyWidget(a), "start");
+    a.pan(OFF_SCREEN);
+    await settle();
+    assert.ok(a.floating.has(HUD_ID));
+    b.message({ type: "delete", id: onlyWidget(b).id });
     await settle();
     assert.equal(a.live().length, 0);
     assert.equal(a.floating.has(HUD_ID), false);
-    assert.equal(b.floating.has(HUD_ID), false);
 });

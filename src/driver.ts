@@ -1,5 +1,4 @@
 import type {
-    DrawdyElementSchema,
     DriverCommandIssuer,
     DriverManifest,
     DriverModule,
@@ -9,33 +8,43 @@ import type {
     SubscribedDrawdyElement,
 } from "@drawdy/driver-protocol";
 import { ACTION_BUTTON_SVG } from "./action-button";
+import { FLASH_MS } from "./lib/face";
 import {
     centredIn,
     findFreeRect,
+    overlaps,
     revealAndSelect,
     visibleArea,
     type Rect,
 } from "./lib/free-spot";
 import {
-    FLASH_MS,
     hudPosition,
     hudSchema,
     nextWake,
+    onScreen,
     pickHud,
     type Theme,
+    type View,
 } from "./lib/hud";
 import {
     DEFAULT_MINUTES,
-    frameNameFor,
+    effective,
     newTimer,
     readTimer,
     reduce,
     sameTimer,
-    toMeta,
-    type ClockFormat,
     type Timer,
     type TimerAction,
 } from "./lib/timer-state";
+import {
+    buttonAt,
+    planReplacement,
+    sameRect,
+    WIDGET_SIZE,
+    widgetElement,
+    type ButtonAction,
+    type Placed,
+} from "./lib/widget";
 import {
     SOUNDS,
     type DriverToWebview,
@@ -46,17 +55,21 @@ import {
 } from "./shared/messages";
 import { WEBVIEW_HTML } from "./webview-html";
 
-export const ANCHOR_SIZE = { width: 240, height: 140 };
-// Text presentation of U+23F1 is a thin outline in most fonts; the variation selector asks for the emoji.
-export const GLYPH = "⏱️";
-const GLYPH_SIZE = 64;
-// Measured on drawdy.io: Drawdy draws the emoji about 8 units above its text box, so this centres it in the card.
-const GLYPH_TOP = 45;
-const PROPERTIES: SubscribeableKey[] = ["type", "meta", "frameId"];
-// An expiry seen later than this (a throttled background tab) still writes "done" but stays silent.
+const PROPERTIES: SubscribeableKey[] = [
+    "type",
+    "meta",
+    "frameId",
+    "x",
+    "y",
+    "width",
+    "height",
+];
+const PLACE_PROPERTIES: SubscribeableKey[] = [...PROPERTIES, "groupId"];
+// A press that moved further than this on screen was a drag, not a click.
+const CLICK_SLOP_PX = 6;
+// A run seen ending later than this (a throttled background tab) stays silent.
 const LIVE_EXPIRY_MS = 10_000;
 const WAKE_SLACK_MS = 15;
-const DEVICE_KEY = "device";
 const PREFS_KEY = "prefs";
 const DEFAULT_SOUND: Sound = "soft";
 
@@ -67,11 +80,17 @@ export const MENU = {
     reset: "timer.reset",
 } as const;
 
+const PRESS: Record<ButtonAction, TimerAction> = {
+    start: { type: "start" },
+    pause: { type: "pause" },
+    "add-minute": { type: "add-minute" },
+    reset: { type: "reset" },
+};
+
 export type Env = {
     now: () => number;
     setTimeout: (fn: () => void, ms: number) => unknown;
     clearTimeout: (handle: unknown) => void;
-    clock: ClockFormat;
 };
 
 const realEnv: Env = {
@@ -79,8 +98,10 @@ const realEnv: Env = {
     setTimeout: (fn, ms) => setTimeout(fn, ms),
     clearTimeout: (handle) =>
         clearTimeout(handle as ReturnType<typeof setTimeout>),
-    clock: {},
 };
+
+type Point = { x: number; y: number };
+type Press = { dom: Point; canvas: Point };
 
 type State = {
     manifest: DriverManifest;
@@ -92,13 +113,16 @@ type State = {
     webviewId: string;
     hudId: string;
     menuIds: Record<keyof typeof MENU, string>;
-    deviceId: string;
     sound: Sound;
-    timers: Map<string, Timer>;
+    timers: Map<string, Placed>;
     glyphs: Map<string, string>;
+    moved: Map<string, string>;
+    down: Press | null;
     selection: string[];
     target: string | null;
+    targetKey: string | null;
     windowWidth: number;
+    view: View | null;
     hudKey: string;
     hudChain: Promise<unknown>;
     flashes: Map<string, number>;
@@ -110,17 +134,6 @@ type State = {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
     typeof value === "object" && value !== null && !Array.isArray(value);
-
-function randomId(): string {
-    const bytes = new Uint8Array(8);
-    try {
-        crypto.getRandomValues(bytes);
-    } catch {
-        for (let i = 0; i < bytes.length; i++)
-            bytes[i] = Math.floor(Math.random() * 256);
-    }
-    return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
 
 export function stylingCssVars(styling: ModuleStyling): string {
     const { tokens, ...flat } = styling as ModuleStyling & {
@@ -142,17 +155,30 @@ function readGlyph(value: unknown): string | null {
         : null;
 }
 
+function rectOf(el: SubscribedDrawdyElement): Rect | null {
+    const { x, y, width, height } = el;
+    return typeof x === "number" &&
+        typeof y === "number" &&
+        typeof width === "number" &&
+        typeof height === "number"
+        ? { x, y, width, height }
+        : null;
+}
+
+const kindOf = (type: string | undefined): Placed["kind"] | null =>
+    type === "component" ? "widget" : type === "frame" ? "frame" : null;
+
 const expiryKey = (timer: Timer): string => `${timer.id}:${timer.endsAt}`;
 
-function toTimerAction(action: unknown, by: string): TimerAction | null {
+function toTimerAction(action: unknown): TimerAction | null {
     if (!isRecord(action)) return null;
     switch (action.type as PanelAction["type"]) {
         case "start":
-            return { type: "start", by };
+            return { type: "start" };
         case "pause":
             return { type: "pause" };
         case "add-minute":
-            return { type: "add-minute", by };
+            return { type: "add-minute" };
         case "reset":
             return { type: "reset" };
         case "set-duration":
@@ -168,39 +194,33 @@ function toTimerAction(action: unknown, by: string): TimerAction | null {
     }
 }
 
-export function anchorSchemas(
-    driverId: string,
-    timer: Timer,
-    glyphId: string,
-    at: { x: number; y: number },
-    now: number,
-    clock: ClockFormat = {}
-): DrawdyElementSchema[] {
-    return [
-        {
-            type: "frame",
-            drawdyElementId: timer.id,
-            name: frameNameFor(timer, now, clock),
-            position: [at.x, at.y],
-            width: ANCHOR_SIZE.width,
-            height: ANCHOR_SIZE.height,
-            rotation: 0,
-            meta: { [driverId]: toMeta(timer) },
-        },
-        {
-            type: "text",
-            drawdyElementId: glyphId,
-            x: at.x,
-            y: at.y + GLYPH_TOP,
-            width: ANCHOR_SIZE.width,
-            text: GLYPH,
-            fontSize: GLYPH_SIZE,
-            color: "#1e1e1e",
-            textAlign: "center",
-            frameId: timer.id,
-            meta: { [driverId]: { v: 1, glyphOf: timer.id } },
-        },
-    ];
+/** Widgets stacked on one spot for one timer read as a single timer. */
+function countTimers(entries: Iterable<Placed>): number {
+    const seen: Placed[] = [];
+    for (const e of entries)
+        if (
+            !seen.some(
+                (o) =>
+                    o.kind === "widget" &&
+                    e.kind === "widget" &&
+                    o.timer.id === e.timer.id &&
+                    sameRect(o.rect, e.rect)
+            )
+        )
+            seen.push(e);
+    return seen.length;
+}
+
+/**
+ * Pills only stand in for timers you can't read on the board: a widget out of
+ * view or too small to read, or a 1.0.0 frame, which never showed a countdown.
+ */
+function pillTimers(entries: Iterable<Placed>, view: View | null): Timer[] {
+    const out: Timer[] = [];
+    for (const entry of entries)
+        if (entry.kind === "frame" || !onScreen(entry.rect, view))
+            out.push(entry.timer);
+    return out;
 }
 
 export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
@@ -256,29 +276,6 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
         }
     }
 
-    async function kvSet(
-        s: State,
-        key: string,
-        payload: Record<string, unknown>
-    ): Promise<void> {
-        await s
-            .issueCommand({
-                type: "command:kv-storage:set",
-                ...stamp(s),
-                req: { key, payload },
-            })
-            .catch(() => undefined);
-    }
-
-    async function loadDevice(s: State): Promise<void> {
-        const stored = await kvGet(s, DEVICE_KEY);
-        if (typeof stored?.id === "string" && stored.id) {
-            s.deviceId = stored.id;
-            return;
-        }
-        await kvSet(s, DEVICE_KEY, { id: s.deviceId });
-    }
-
     async function loadPrefs(s: State): Promise<void> {
         const stored = await kvGet(s, PREFS_KEY);
         if (SOUNDS.includes(stored?.sound as Sound))
@@ -287,19 +284,43 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
 
     async function fetchElements(
         s: State,
-        ids?: string[]
+        ids?: string[],
+        properties: SubscribeableKey[] = PROPERTIES
     ): Promise<SubscribedDrawdyElement[]> {
         try {
             const res = await s.issueCommand({
                 type: "command:scene:get-drawdy-elements",
                 ...stamp(s),
-                req: { properties: PROPERTIES, drawdyElementIds: ids },
+                req: { properties, drawdyElementIds: ids },
             });
             return res.res.error === undefined
                 ? res.res.value.drawdyElements
                 : [];
         } catch {
             return [];
+        }
+    }
+
+    async function readView(s: State): Promise<void> {
+        try {
+            const [view, cam] = await Promise.all([
+                s.issueCommand({
+                    type: "command:camera:get-viewport-rect",
+                    ...stamp(s),
+                }),
+                s.issueCommand({
+                    type: "command:camera:get-info",
+                    ...stamp(s),
+                }),
+            ]);
+            if (view.res.error !== undefined) return;
+            const zoom =
+                cam.res.error === undefined && cam.res.value.zoom > 0
+                    ? cam.res.value.zoom
+                    : 1;
+            s.view = { rect: view.res.value.rect, zoom };
+        } catch {
+            return;
         }
     }
 
@@ -310,11 +331,18 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
         let changed = false;
         for (const el of elements) {
             const raw = el.meta?.[s.driverId];
-            const timer = el.type === "frame" ? readTimer(raw, el.id) : null;
-            if (timer) {
-                const prev = s.timers.get(el.id);
-                if (!prev || !sameTimer(prev, timer)) {
-                    s.timers.set(el.id, timer);
+            const prev = s.timers.get(el.id);
+            const kind = kindOf(el.type) ?? (el.type ? null : prev?.kind);
+            const timer = kind ? readTimer(raw, el.id) : null;
+            if (kind && timer) {
+                const rect = rectOf(el) ?? prev?.rect ?? null;
+                if (
+                    !prev ||
+                    prev.kind !== kind ||
+                    !sameTimer(prev.timer, timer) ||
+                    !sameRect(prev.rect, rect)
+                ) {
+                    s.timers.set(el.id, { el: el.id, kind, timer, rect });
                     changed = true;
                 }
                 continue;
@@ -331,9 +359,18 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
         for (const id of ids) {
             s.timers.delete(id);
             s.glyphs.delete(id);
-            s.flashes.delete(id);
-            if (s.target === id) s.target = null;
         }
+    }
+
+    /** Follows a widget through its replacements, so a press or panel action sent just before one still lands. */
+    function resolve(s: State, id: string): string {
+        const seen = new Set<string>();
+        let at = id;
+        while (!s.timers.has(at) && s.moved.has(at) && !seen.has(at)) {
+            seen.add(at);
+            at = s.moved.get(at)!;
+        }
+        return at;
     }
 
     function selectedTimer(s: State): string | null {
@@ -345,14 +382,27 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
         return null;
     }
 
-    /** The selected timer, else the one last selected or added, else the newest. */
+    function remember(s: State, id: string): string {
+        s.target = id;
+        s.targetKey = s.timers.get(id)?.timer.id ?? null;
+        return id;
+    }
+
+    /**
+     * The selected timer, else the one last selected, added or pressed, else
+     * the newest. A widget someone else replaced is found again by its timer id.
+     */
     function targetId(s: State): string | null {
         const selected = selectedTimer(s);
-        if (selected) {
-            s.target = selected;
-            return selected;
+        if (selected) return remember(s, selected);
+        if (s.target) {
+            const target = resolve(s, s.target);
+            if (s.timers.has(target)) return remember(s, target);
+            const same = [...s.timers.values()].filter(
+                (e) => e.timer.id === s.targetKey
+            );
+            if (same.length) return remember(s, same.at(-1)!.el);
         }
-        if (s.target && s.timers.has(s.target)) return s.target;
         return [...s.timers.keys()].at(-1) ?? null;
     }
 
@@ -362,11 +412,11 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
 
     /**
      * Each client reacts once to each run ending, and only to runs it watched,
-     * so opening a board hours later is silent and undoing "done" doesn't re-fire it.
+     * so opening a board hours later is silent and undoing a press doesn't re-fire it.
      */
     function processExpiries(s: State, now: number): void {
         let chimed = false;
-        for (const timer of s.timers.values()) {
+        for (const { timer } of s.timers.values()) {
             if (timer.endsAt === undefined) continue;
             if (timer.state !== "running" && timer.state !== "done") continue;
             const key = expiryKey(timer);
@@ -377,15 +427,10 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
             if (s.handled.has(key)) continue;
             s.handled.add(key);
             if (!s.seenRunning.has(key)) continue;
-            if (now - timer.endsAt <= LIVE_EXPIRY_MS) {
-                s.flashes.set(timer.id, now + FLASH_MS);
-                if (!chimed) chime(s);
-                chimed = true;
-            }
-            if (timer.state === "running" && timer.startedBy === s.deviceId) {
-                const id = timer.id;
-                void enqueue(() => act(s, id, [{ type: "expire" }]));
-            }
+            if (now - timer.endsAt > LIVE_EXPIRY_MS) continue;
+            s.flashes.set(timer.id, timer.endsAt + FLASH_MS);
+            if (!chimed) chime(s);
+            chimed = true;
         }
     }
 
@@ -394,7 +439,10 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
     }
 
     function renderHud(s: State, now: number): void {
-        const view = pickHud(s.timers.values(), now, s.flashes);
+        const candidates = pillTimers(s.timers.values(), s.view).filter(
+            (t) => effective(t, now).state !== "paused"
+        );
+        const view = pickHud(candidates, now, s.flashes);
         const theme: Theme = s.styling.theme === "light" ? "light" : "dark";
         const position = hudPosition(s.windowWidth);
         const key = view ? JSON.stringify({ view, theme, position }) : "";
@@ -424,10 +472,11 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
 
     function syncPanel(s: State, force = false): void {
         const id = targetId(s);
+        const entry = id ? s.timers.get(id) : undefined;
         const message: DriverToWebview = {
             type: "state",
-            timer: id ? (s.timers.get(id) ?? null) : null,
-            count: s.timers.size,
+            timer: entry ? { ...entry.timer, id: entry.el } : null,
+            count: countTimers(s.timers.values()),
             sound: s.sound,
         };
         const serialized = JSON.stringify(message);
@@ -439,7 +488,8 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
     function schedule(s: State, now: number): void {
         if (s.wake !== null) env.clearTimeout(s.wake);
         s.wake = null;
-        const at = nextWake(s.timers.values(), now, s.flashes);
+        const timers = [...s.timers.values()].map((e) => e.timer);
+        const at = nextWake(timers, now, s.flashes);
         if (at === null) return;
         s.wake = env.setTimeout(
             () => {
@@ -460,40 +510,101 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
         schedule(s, now);
     }
 
-    /** One user gesture is one anchor update, carrying both the state and the frame name, so it is one undo step. */
+    /** One gesture is a new widget with the new state at the old one's place, then the old one removed. */
     async function act(
         s: State,
         id: string,
         actions: TimerAction[]
     ): Promise<void> {
-        const current = s.timers.get(id);
-        if (!current) return;
+        const entry = s.timers.get(resolve(s, id));
+        if (!entry) return;
         const now = env.now();
-        const next = actions.reduce((t, a) => reduce(t, a, now), current);
-        if (sameTimer(next, current)) return;
-        s.timers.set(id, next);
-        refresh(s);
-        const res = await s.issueCommand({
-            type: "command:scene:update-drawdy-elements",
-            ...stamp(s),
-            req: {
-                updates: [
-                    {
-                        drawdyElementId: id,
-                        properties: {
-                            meta: { [s.driverId]: toMeta(next) },
-                            frameName: frameNameFor(next, now, env.clock),
-                        },
-                    },
-                ],
-            },
+        const next = actions.reduce((t, a) => reduce(t, a, now), entry.timer);
+        if (entry.kind === "widget" && sameTimer(next, entry.timer)) return;
+        const [current] = await fetchElements(s, [entry.el], PLACE_PROPERTIES);
+        const at = current ? rectOf(current) : null;
+        if (!current || !at) {
+            forget(s, [entry.el]);
+            refresh(s);
+            return;
+        }
+        const newId = s.generateId();
+        const plan = planReplacement({
+            driverId: s.driverId,
+            old: { ...entry, rect: at },
+            at,
+            others: [...s.timers.values()].filter((o) => o.el !== entry.el),
+            glyphs: [...s.glyphs]
+                .filter(([, anchor]) => anchor === entry.el)
+                .map(([glyph]) => glyph),
+            next,
+            newId,
+            now,
+            place: { frameId: current.frameId, groupId: current.groupId },
         });
-        if (res.res.error === undefined && res.res.value.updated > 0) return;
-        const [el] = await fetchElements(s, [id]);
-        if (el) absorb(s, [el]);
-        else forget(s, [id]);
+        const added = await s.issueCommand({
+            type: "command:scene:add-drawdy-elements",
+            ...stamp(s),
+            req: { elements: [plan.element] },
+        });
+        if (added.res.error !== undefined) {
+            fail(s, added.res.error.type);
+            return;
+        }
+        s.timers.set(newId, {
+            el: newId,
+            kind: "widget",
+            timer: plan.timer,
+            rect: plan.rect,
+        });
+        const reselect = plan.remove.some((r) => s.selection.includes(r));
+        const removed = await s.issueCommand({
+            type: "command:scene:remove-drawdy-elements",
+            ...stamp(s),
+            req: { drawdyElementIds: plan.remove },
+        });
+        if (removed.res.error !== undefined) fail(s, removed.res.error.type);
+        else {
+            forget(s, plan.remove);
+            for (const gone of plan.remove) s.moved.set(gone, newId);
+        }
+        if (s.target === null || plan.remove.includes(s.target))
+            s.target = newId;
         refresh(s);
-        fail(s, res.res.error?.type);
+        if (reselect) {
+            s.selection = [newId];
+            await s
+                .issueCommand({
+                    type: "command:scene:set-selection",
+                    ...stamp(s),
+                    req: { drawdyElementIds: [newId] },
+                })
+                .catch(() => undefined);
+        }
+    }
+
+    /**
+     * A click on a widget's button row is a press. Several widgets sit under
+     * one click only when stacked, after an undo or presses that crossed, and
+     * the one added last, which Drawdy draws on top, is the one pressed.
+     */
+    async function clickAt(
+        s: State,
+        ids: readonly string[],
+        point: Point
+    ): Promise<void> {
+        const clicked = new Set(ids);
+        const hits = [...s.timers.values()].filter(
+            (e) => e.kind === "widget" && clicked.has(e.el)
+        );
+        for (const entry of hits.reverse()) {
+            const action =
+                entry.rect && buttonAt(entry.rect, entry.timer, point);
+            if (!action) continue;
+            s.target = entry.el;
+            await act(s, entry.el, [PRESS[action]]);
+            return;
+        }
     }
 
     function placeCtx(s: State) {
@@ -506,7 +617,7 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
     }
 
     async function addTimer(s: State): Promise<void> {
-        const { width, height } = ANCHOR_SIZE;
+        const { width, height } = WIDGET_SIZE;
         const area = await visibleArea(placeCtx(s));
         const centred = area
             ? centredIn(area, width, height)
@@ -517,29 +628,21 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
             (e) => e.type !== "frame" || s.timers.has(e.id)
         );
         const id = s.generateId();
-        const glyphId = s.generateId();
         const now = env.now();
         const timer = newTimer(id, DEFAULT_MINUTES);
         const added = await s.issueCommand({
             type: "command:scene:add-drawdy-elements",
             ...stamp(s),
             req: {
-                elements: anchorSchemas(
-                    s.driverId,
-                    timer,
-                    glyphId,
-                    spot,
-                    now,
-                    env.clock
-                ),
+                elements: [widgetElement(s.driverId, id, timer, spot, now)],
             },
         });
         if (added.res.error !== undefined) {
             fail(s, added.res.error.type);
             return;
         }
-        if (!s.timers.has(id)) s.timers.set(id, timer);
-        s.glyphs.set(glyphId, id);
+        if (!s.timers.has(id))
+            s.timers.set(id, { el: id, kind: "widget", timer, rect: spot });
         s.target = id;
         s.selection = [id];
         refresh(s);
@@ -547,34 +650,46 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
     }
 
     async function removeTimer(s: State, id: string): Promise<void> {
-        if (!s.timers.has(id)) return;
+        const entry = s.timers.get(resolve(s, id));
+        if (!entry) return;
+        const stacked = [...s.timers.values()]
+            .filter(
+                (o) =>
+                    o.el !== entry.el &&
+                    o.kind === "widget" &&
+                    o.timer.id === entry.timer.id &&
+                    sameRect(o.rect, entry.rect)
+            )
+            .map((o) => o.el);
         const glyphs = [...s.glyphs]
-            .filter(([, anchor]) => anchor === id)
+            .filter(([, anchor]) => anchor === entry.el)
             .map(([glyph]) => glyph);
+        const ids = [entry.el, ...glyphs, ...stacked];
         const res = await s.issueCommand({
             type: "command:scene:remove-drawdy-elements",
             ...stamp(s),
-            req: { drawdyElementIds: [id, ...glyphs] },
+            req: { drawdyElementIds: ids },
         });
         if (res.res.error !== undefined) {
             fail(s, res.res.error.type);
             return;
         }
-        forget(s, [id, ...glyphs]);
+        forget(s, ids);
         refresh(s);
     }
 
     async function locate(s: State, id: string): Promise<void> {
+        const el = resolve(s, id);
         const res = await s.issueCommand({
             type: "command:scene:element-rects",
             ...stamp(s),
-            req: { drawdyElementIds: [id] },
+            req: { drawdyElementIds: [el] },
         });
         const rect =
             res.res.error === undefined ? res.res.value.rects[0]?.rect : null;
         if (!rect) return;
-        s.target = id;
-        await revealAndSelect(placeCtx(s), [id], rect);
+        s.target = el;
+        await revealAndSelect(placeCtx(s), [el], rect);
     }
 
     async function openPanel(s: State): Promise<void> {
@@ -592,7 +707,12 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
             },
         });
         if (created.res.error !== undefined) return;
-        if (s.timers.size === 0) await addTimer(s);
+        await readView(s);
+        const inView = [...s.timers.values()].filter(
+            (e) => e.rect && s.view && overlaps(e.rect, s.view.rect)
+        );
+        if (inView.length === 0) await addTimer(s);
+        else if (!selectedTimer(s)) s.target = inView.at(-1)!.el;
         syncPanel(s, true);
     }
 
@@ -609,11 +729,9 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
         await readSelection(s);
         const id = targetId(s);
         if (!id) return;
-        const by = s.deviceId;
-        if (menuId === s.menuIds.toggle)
-            await act(s, id, [{ type: "toggle", by }]);
+        if (menuId === s.menuIds.toggle) await act(s, id, [{ type: "toggle" }]);
         else if (menuId === s.menuIds.addMinute)
-            await act(s, id, [{ type: "add-minute", by }]);
+            await act(s, id, [{ type: "add-minute" }]);
         else if (menuId === s.menuIds.reset)
             await act(s, id, [{ type: "reset" }]);
     }
@@ -632,7 +750,7 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
             case "act": {
                 if (!Array.isArray(message.actions)) return;
                 const actions = message.actions
-                    .map((a) => toTimerAction(a, s.deviceId))
+                    .map(toTimerAction)
                     .filter((a): a is TimerAction => a !== null);
                 if (actions.length === 0) return;
                 await enqueue(() => act(s, message.id, actions));
@@ -648,7 +766,13 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
                 if (!SOUNDS.includes(message.value)) return;
                 s.sound = message.value;
                 syncPanel(s);
-                await kvSet(s, PREFS_KEY, { sound: s.sound });
+                await s
+                    .issueCommand({
+                        type: "command:kv-storage:set",
+                        ...stamp(s),
+                        req: { key: PREFS_KEY, payload: { sound: s.sound } },
+                    })
+                    .catch(() => undefined);
                 return;
             }
             default:
@@ -671,6 +795,12 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
             }),
             issue({ type: "subscription:dom:theme-changed", ...stamp(s) }),
             issue({ type: "subscription:dom:screen-resized", ...stamp(s) }),
+            issue({
+                type: "subscription:camera:moved-debounced",
+                ...stamp(s),
+            }),
+            issue({ type: "subscription:scene:pointer", ...stamp(s), req: {} }),
+            issue({ type: "subscription:scene:click", ...stamp(s), req: {} }),
             ...(
                 [
                     "subscription:scene:elements-added",
@@ -718,13 +848,16 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
                 addMinute: `${driverId}:${MENU.addMinute}`,
                 reset: `${driverId}:${MENU.reset}`,
             },
-            deviceId: randomId(),
             sound: DEFAULT_SOUND,
             timers: new Map(),
             glyphs: new Map(),
+            moved: new Map(),
+            down: null,
             selection: [],
             target: null,
+            targetKey: null,
             windowWidth: 1280,
+            view: null,
             hudKey: "",
             hudChain: Promise.resolve(),
             flashes: new Map(),
@@ -755,13 +888,13 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
                 ],
             },
         });
-        await loadDevice(s);
         await loadPrefs(s);
         const size = await issueCommand({
             type: "command:dom:window-size",
             ...stamp(s),
         });
         if (size.res.error === undefined) s.windowWidth = size.res.value.width;
+        await readView(s);
         absorb(s, await fetchElements(s));
         await readSelection(s);
         refresh(s);
@@ -778,6 +911,28 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
                     await enqueue(() => openPanel(s));
                 return;
             }
+            case "subscription:scene:pointer": {
+                if (event.body.type === "down")
+                    s.down = {
+                        dom: event.body.cursor.domSpace,
+                        canvas: event.body.cursor.canvasSpace,
+                    };
+                return;
+            }
+            case "subscription:scene:click": {
+                const down = s.down;
+                s.down = null;
+                const up = event.body.cursor.domSpace;
+                if (
+                    !down ||
+                    Math.hypot(up.x - down.dom.x, up.y - down.dom.y) >
+                        CLICK_SLOP_PX
+                )
+                    return;
+                const ids = event.body.drawdyElementIds;
+                await enqueue(() => clickAt(s, ids, down.canvas));
+                return;
+            }
             case "subscription:webview:message": {
                 if (event.body.webviewDomId !== s.webviewId) return;
                 if (!isRecord(event.body.message)) return;
@@ -792,6 +947,12 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
             }
             case "subscription:dom:screen-resized": {
                 s.windowWidth = event.body.width;
+                await readView(s);
+                refresh(s);
+                return;
+            }
+            case "subscription:camera:moved-debounced": {
+                await readView(s);
                 refresh(s);
                 return;
             }

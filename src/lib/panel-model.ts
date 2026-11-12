@@ -1,4 +1,4 @@
-import { URGENT_SECONDS } from "./hud";
+import { URGENT_SECONDS } from "./face";
 import {
     clockTime,
     effective,
@@ -34,6 +34,24 @@ export const PRIMARY_LABEL: Record<PrimaryAction, string> = {
     resume: "Resume",
     restart: "Start again",
 };
+
+/** The one start-or-pause control, as both the panel and the widget on the board show it. */
+export function primaryAction(
+    state: TimerState
+): Exclude<PrimaryAction, "add"> {
+    return state === "running"
+        ? "pause"
+        : state === "paused"
+          ? "resume"
+          : state === "done"
+            ? "restart"
+            : "start";
+}
+
+/** Reset changes nothing on a ready timer that still has its whole length. */
+export function canReset(timer: Timer): boolean {
+    return !(timer.state === "ready" && timer.remainingMs === timer.durationMs);
+}
 
 export function panelModel(
     timer: Timer | null,
@@ -74,15 +92,8 @@ export function panelModel(
         urgent:
             e.state === "running" &&
             Math.ceil(remaining / 1000) <= URGENT_SECONDS,
-        primary:
-            e.state === "running"
-                ? "pause"
-                : e.state === "paused"
-                  ? "resume"
-                  : e.state === "done"
-                    ? "restart"
-                    : "start",
-        canReset: !(e.state === "ready" && e.remainingMs === e.durationMs),
+        primary: primaryAction(e.state),
+        canReset: canReset(e),
         lengthLocked: e.state === "running" || e.state === "paused",
         minutes,
         preset: (PRESET_MINUTES as readonly number[]).includes(minutes)

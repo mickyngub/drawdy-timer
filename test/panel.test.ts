@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chimeLength, chimeTones } from "../webview/lib/chime";
-import { panelModel } from "../src/lib/panel-model";
+import { panelModel, primaryAction } from "../src/lib/panel-model";
 import { MINUTE_MS, newTimer, reduce } from "../src/lib/timer-state";
 
 const NOW = Date.UTC(2026, 10, 12, 14, 0, 0);
@@ -23,7 +23,7 @@ test("a ready timer offers Start, its preset, and nothing to reset", () => {
 });
 
 test("while running the panel offers Pause, locks the length and turns urgent at ten seconds", () => {
-    const timer = reduce(newTimer("t", 1), { type: "start", by: "a" }, NOW);
+    const timer = reduce(newTimer("t", 1), { type: "start" }, NOW);
     const model = panelModel(timer, NOW + 30_000);
     assert.equal(model.primary, "pause");
     assert.equal(model.lengthLocked, true);
@@ -34,7 +34,7 @@ test("while running the panel offers Pause, locks the length and turns urgent at
 });
 
 test("paused offers Resume and a finished timer offers to start again", () => {
-    const timer = reduce(newTimer("t", 1), { type: "start", by: "a" }, NOW);
+    const timer = reduce(newTimer("t", 1), { type: "start" }, NOW);
     assert.equal(
         panelModel(reduce(timer, { type: "pause" }, NOW + 5000), NOW + 9000)
             .primary,
@@ -44,6 +44,13 @@ test("paused offers Resume and a finished timer offers to start again", () => {
     assert.equal(done.state, "done");
     assert.equal(done.primary, "restart");
     assert.equal(done.lengthLocked, false);
+});
+
+test("the start or pause control reads the state the same way on the panel and the board", () => {
+    assert.deepEqual(
+        (["ready", "running", "paused", "done"] as const).map(primaryAction),
+        ["start", "pause", "resume", "restart"]
+    );
 });
 
 test("both chimes are short and audible, and the bell rings louder than the soft one", () => {

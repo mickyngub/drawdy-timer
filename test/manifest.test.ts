@@ -88,7 +88,7 @@ test("the listing files fit Drawdy's limits and the changelog has this version",
     );
 });
 
-test("the manifest asks for the panel, the board and storage for this device's sound and id", () => {
+test("the manifest asks for the panel, the board and storage for this device's sound", () => {
     assert.deepEqual([...manifest.permissions].sort(), [
         "dom",
         "scene",

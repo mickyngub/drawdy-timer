@@ -11,7 +11,11 @@ export type TimerState = "ready" | "running" | "paused" | "done";
 
 const STATES: readonly TimerState[] = ["ready", "running", "paused", "done"];
 
-/** What an anchor frame keeps in `meta[driverId]`; `endsAt` is wall-clock time and is set while running and once done. */
+/**
+ * What a timer widget keeps in `meta[driverId]`. `id` names the timer and
+ * survives each replacement of its widget; `endsAt` is wall-clock time, set
+ * while running and kept once done.
+ */
 export type Timer = {
     v: 1;
     id: string;
@@ -20,14 +24,13 @@ export type Timer = {
     remainingMs: number;
     endsAt?: number;
     label: string;
-    startedBy: string;
 };
 
 export type TimerAction =
-    | { type: "start"; by: string }
+    | { type: "start" }
     | { type: "pause" }
-    | { type: "toggle"; by: string }
-    | { type: "add-minute"; by: string }
+    | { type: "toggle" }
+    | { type: "add-minute" }
     | { type: "reset" }
     | { type: "set-duration"; minutes: number }
     | { type: "set-label"; label: string }
@@ -57,7 +60,6 @@ export function newTimer(
         durationMs: ms,
         remainingMs: ms,
         label: cleanLabel(label),
-        startedBy: "",
     };
 }
 
@@ -85,7 +87,7 @@ export function remainingAt(timer: Timer, now: number): number {
     return e.remainingMs;
 }
 
-function start(e: Timer, by: string, now: number): Timer {
+function start(e: Timer, now: number): Timer {
     switch (e.state) {
         case "running":
             return e;
@@ -95,15 +97,9 @@ function start(e: Timer, by: string, now: number): Timer {
                 state: "running",
                 remainingMs: e.durationMs,
                 endsAt: now + e.durationMs,
-                startedBy: by,
             };
         default:
-            return {
-                ...e,
-                state: "running",
-                endsAt: now + e.remainingMs,
-                startedBy: by,
-            };
+            return { ...e, state: "running", endsAt: now + e.remainingMs };
     }
 }
 
@@ -116,7 +112,7 @@ function pause(e: Timer, now: number): Timer {
     });
 }
 
-function addMinute(e: Timer, by: string, now: number): Timer {
+function addMinute(e: Timer, now: number): Timer {
     switch (e.state) {
         case "running":
             return {
@@ -144,7 +140,6 @@ function addMinute(e: Timer, by: string, now: number): Timer {
                 state: "running",
                 remainingMs: MINUTE_MS,
                 endsAt: now + MINUTE_MS,
-                startedBy: by,
             };
     }
 }
@@ -153,15 +148,13 @@ export function reduce(timer: Timer, action: TimerAction, now: number): Timer {
     const e = effective(timer, now);
     switch (action.type) {
         case "start":
-            return start(e, action.by, now);
+            return start(e, now);
         case "pause":
             return pause(e, now);
         case "toggle":
-            return e.state === "running"
-                ? pause(e, now)
-                : start(e, action.by, now);
+            return e.state === "running" ? pause(e, now) : start(e, now);
         case "add-minute":
-            return addMinute(e, action.by, now);
+            return addMinute(e, now);
         case "reset":
             return withoutEnd({
                 ...e,
@@ -180,7 +173,7 @@ export function reduce(timer: Timer, action: TimerAction, now: number): Timer {
             });
         }
         case "set-label":
-            return { ...timer, label: cleanLabel(action.label) };
+            return { ...e, label: cleanLabel(action.label) };
         case "expire":
             return e;
     }
@@ -193,8 +186,7 @@ export function sameTimer(a: Timer, b: Timer): boolean {
         a.durationMs === b.durationMs &&
         a.remainingMs === b.remainingMs &&
         a.endsAt === b.endsAt &&
-        a.label === b.label &&
-        a.startedBy === b.startedBy
+        a.label === b.label
     );
 }
 
@@ -215,34 +207,16 @@ export function clockTime(at: number, format: ClockFormat = {}): string {
     }).format(at);
 }
 
-/** The frame's name is the one piece of text an extension can change live, so it carries the state for people without Timer. */
-export function frameNameFor(
-    timer: Timer,
-    now: number,
-    format: ClockFormat = {}
-): string {
-    const e = effective(timer, now);
-    const head =
-        e.state === "ready"
-            ? `⏱ ${formatRemaining(e.remainingMs)}`
-            : e.state === "running"
-              ? `⏱ Running · ends ${clockTime(e.endsAt ?? now, format)}`
-              : e.state === "paused"
-                ? `⏸ Paused · ${formatRemaining(e.remainingMs)} left`
-                : "✓ Time's up";
-    return e.label ? `${head} · ${e.label}` : head;
-}
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
     typeof value === "object" && value !== null && !Array.isArray(value);
 
 const isTime = (value: unknown): value is number =>
     typeof value === "number" && Number.isFinite(value);
 
-/** Reads an anchor's meta; the element id wins over the stored one, so a pasted copy acts as its own timer. */
-export function readTimer(value: unknown, elementId: string): Timer | null {
+/** Reads a timer's meta; the stored id names the timer, and `fallbackId` stands in when it is missing. */
+export function readTimer(value: unknown, fallbackId: string): Timer | null {
     if (!isRecord(value) || value.v !== 1) return null;
-    const { state, durationMs, remainingMs, endsAt, label, startedBy } = value;
+    const { id, state, durationMs, remainingMs, endsAt, label } = value;
     if (!STATES.includes(state as TimerState)) return null;
     if (!isTime(durationMs) || durationMs <= 0) return null;
     if (!isTime(remainingMs) || remainingMs < 0) return null;
@@ -250,13 +224,12 @@ export function readTimer(value: unknown, elementId: string): Timer | null {
     if (state === "running" && endsAt === undefined) return null;
     return {
         v: 1,
-        id: elementId,
+        id: typeof id === "string" && id ? id : fallbackId,
         state: state as TimerState,
         durationMs,
         remainingMs,
         ...(endsAt !== undefined ? { endsAt } : {}),
         label: typeof label === "string" ? cleanLabel(label) : "",
-        startedBy: typeof startedBy === "string" ? startedBy : "",
     };
 }
 
@@ -269,6 +242,5 @@ export function toMeta(timer: Timer): Record<string, unknown> {
         remainingMs: timer.remainingMs,
         ...(timer.endsAt !== undefined ? { endsAt: timer.endsAt } : {}),
         label: timer.label,
-        startedBy: timer.startedBy,
     };
 }
