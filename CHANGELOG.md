@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.0
+
+The timer is now a widget on the board that everyone sees ticking, with or without Timer
+
+- the widget shows big digits, a ring that drains as time runs, the label and the state, and counts down on every screen from the same end time
+- Start, Pause or Resume, +1 min and Reset sit on the widget; pressing one needs Timer, so people without it watch the countdown
+- in the last 10 seconds the ring and digits turn amber and pulse gently; at zero it reads "Time's up", pulses for 5 seconds, then holds
+- the widget follows the board's light or dark theme on each screen
+- the countdown pill now shows only while the running timer is off screen or too small to read
+- each press swaps the widget for a new one, so undoing a press takes two steps
+- 1.0.0 timer cards keep counting and turn into widgets the first time someone changes them
+
 ## 1.0.0
 
 First public release
