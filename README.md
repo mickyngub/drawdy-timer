@@ -4,7 +4,7 @@
 
 A countdown that lives on the board, so everyone in the session watches the same clock. Start a five-minute brainstorm and the timer ticks on every screen, even for people who don't have Timer, then chimes when time is up ✧
 
-![Clicking the stopwatch in the rail drops a timer on the board; picking 5 minutes, typing the label Silent brainstorm and pressing Start on the timer starts the ring draining, then it is paused, given an extra minute and resumed before it reads Time's up](https://raw.githubusercontent.com/mickyngub/drawdy-timer/main/docs/media/timer.gif)
+![Clicking the stopwatch in the rail opens the panel and drops a five-minute timer on the board; picking 1 minute in the panel and pressing Start on the timer sets the ring draining; typing the label Silent brainstorm in the panel puts it on the running timer, and pressing +1 min on the timer takes it from 0:53 to 1:53 and refills the ring](https://raw.githubusercontent.com/mickyngub/drawdy-timer/main/docs/media/timer.gif)
 
 ---
 
