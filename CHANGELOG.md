@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.1
+
+Timers on a view-only board
+
+- on a board shared view-only, people watch timers tick but can't change them; a press on the timer, the rail button, the right-click menu or the panel shows "View only: ask for edit access to change timers" at the top of the screen for a moment instead
+- the panel says View only at the top and holds back its timer controls; the sound choice still works, since it belongs to each device
+- a view-only screen no longer writes the finished state at zero; people who can edit the board still do
+- on a Drawdy without view-only support, Timer works as in 1.1.0
+
 ## 1.1.0
 
 The timer is now a widget on the board that everyone sees ticking, with or without Timer

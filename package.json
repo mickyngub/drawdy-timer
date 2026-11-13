@@ -1,6 +1,6 @@
 {
     "name": "drawdy-timer",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "description": "Timer for Drawdy: a shared countdown everyone on the board sees, for workshops, retros and timeboxed critiques.",
     "license": "MIT",
     "private": true,
