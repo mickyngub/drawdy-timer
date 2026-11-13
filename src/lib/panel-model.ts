@@ -26,7 +26,21 @@ export type PanelModel = {
     minutes: number;
     preset: number | null;
     label: string;
+    viewOnly: boolean;
 };
+
+/** "off" is a control with nothing to do; "view-only" is one held back because this person may only view the board. */
+export type ControlState = "on" | "off" | "view-only";
+
+export type PanelControl =
+    | "primary"
+    | "add"
+    | "delete"
+    | "add-minute"
+    | "reset"
+    | "length"
+    | "label"
+    | "sound";
 
 export const PRIMARY_LABEL: Record<PrimaryAction, string> = {
     add: "Add timer",
@@ -57,7 +71,10 @@ export function canReset(timer: Timer): boolean {
 export function panelModel(
     timer: Timer | null,
     now: number,
-    format: ClockFormat = {}
+    {
+        viewOnly = false,
+        format = {},
+    }: { viewOnly?: boolean; format?: ClockFormat } = {}
 ): PanelModel {
     if (!timer) {
         return {
@@ -72,6 +89,7 @@ export function panelModel(
             minutes: 5,
             preset: 5,
             label: "",
+            viewOnly,
         };
     }
     const e = effective(timer, now);
@@ -101,5 +119,29 @@ export function panelModel(
             ? minutes
             : null,
         label: e.label,
+        viewOnly,
+    };
+}
+
+/**
+ * On a view-only board every control that would write to it is held back but
+ * stays clickable, so a click can say why. The sound choice belongs to this
+ * device and stays on.
+ */
+export function panelControls(
+    model: PanelModel
+): Record<PanelControl, ControlState> {
+    const write = (usable: boolean): ControlState =>
+        !usable ? "off" : model.viewOnly ? "view-only" : "on";
+    const hasTimer = model.view === "timer";
+    return {
+        primary: write(true),
+        add: write(true),
+        delete: write(hasTimer),
+        "add-minute": write(hasTimer),
+        reset: write(model.canReset),
+        length: write(hasTimer && !model.lengthLocked),
+        label: write(hasTimer),
+        sound: "on",
     };
 }

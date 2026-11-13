@@ -4,10 +4,12 @@ import type {
     DriverModule,
     DriverSubscriptionEvent,
     ModuleStyling,
+    ProtocolCommandError,
     SubscribeableKey,
     SubscribedDrawdyElement,
 } from "@drawdy/driver-protocol";
 import { ACTION_BUTTON_SVG } from "./action-button";
+import { canEdit, isReadOnlyRefusal } from "./lib/can-edit";
 import { FLASH_MS } from "./lib/face";
 import {
     centredIn,
@@ -23,6 +25,7 @@ import {
     nextWake,
     onScreen,
     pickHud,
+    type HudView,
     type Theme,
     type View,
 } from "./lib/hud";
@@ -72,6 +75,7 @@ const LIVE_EXPIRY_MS = 10_000;
 // Past this, anyone with Timer writes a finished run's done state in case its presser's tab is gone.
 const FALLBACK_FINISH_MS = 5_000;
 const WAKE_SLACK_MS = 15;
+const VIEW_ONLY_NOTICE_MS = 2_500;
 const PREFS_KEY = "prefs";
 const DEFAULT_SOUND: Sound = "soft";
 
@@ -134,6 +138,8 @@ type State = {
     handled: Set<string>;
     wake: unknown;
     lastPanel: string;
+    canEdit: boolean;
+    noticeUntil: number;
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -260,6 +266,49 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
         const reason: PanelError =
             type === "unauthorized" ? "denied" : "failed";
         post(s, { type: "error", reason });
+    }
+
+    function placeCtx(s: State) {
+        return {
+            issueCommand: s.issueCommand,
+            driverId: s.driverId,
+            nextRequestId: () => String(requestId++),
+            webviewDomId: s.webviewId,
+        };
+    }
+
+    /** The answer is cached only for the panel to show; every write asks again, since a role can change at any time. */
+    async function checkEdit(s: State): Promise<boolean> {
+        s.canEdit = await canEdit(placeCtx(s));
+        syncPanel(s);
+        return s.canEdit;
+    }
+
+    function noticeViewOnly(s: State): void {
+        s.noticeUntil = env.now() + VIEW_ONLY_NOTICE_MS;
+        refresh(s);
+    }
+
+    /** A gesture someone can't make here explains itself; a write Timer makes on its own (`quiet`) just doesn't happen. */
+    async function mayWrite(s: State, quiet: boolean): Promise<boolean> {
+        if (await checkEdit(s)) return true;
+        if (!quiet) noticeViewOnly(s);
+        return false;
+    }
+
+    function becameViewOnly(s: State, quiet: boolean): void {
+        s.canEdit = false;
+        if (quiet) refresh(s);
+        else noticeViewOnly(s);
+    }
+
+    function refused(
+        s: State,
+        error: ProtocolCommandError,
+        quiet: boolean
+    ): void {
+        if (isReadOnlyRefusal(error)) becameViewOnly(s, quiet);
+        else fail(s, error.type);
     }
 
     async function kvGet(
@@ -473,7 +522,7 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
         if (!entry || entry.kind !== "widget") return;
         if (entry.timer.state !== "running" || expiryKey(entry.timer) !== key)
             return;
-        await act(s, el, [{ type: "expire" }]);
+        await act(s, el, [{ type: "expire" }], true);
     }
 
     function hudCommand(s: State, command: () => Promise<unknown>): void {
@@ -484,7 +533,10 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
         const candidates = pillTimers(s.timers.values(), s.view).filter(
             (t) => effective(t, now).state !== "paused"
         );
-        const view = pickHud(candidates, now, s.flashes);
+        const view: HudView | null =
+            s.noticeUntil > now
+                ? { kind: "notice" }
+                : pickHud(candidates, now, s.flashes);
         const theme: Theme = s.styling.theme === "light" ? "light" : "dark";
         const position = hudPosition(s.windowWidth);
         const key = view ? JSON.stringify({ view, theme, position }) : "";
@@ -520,6 +572,7 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
             timer: entry ? { ...entry.timer, id: entry.el } : null,
             count: countTimers(s.timers.values()),
             sound: s.sound,
+            viewOnly: !s.canEdit,
         };
         const serialized = JSON.stringify(message);
         if (!force && serialized === s.lastPanel) return;
@@ -536,6 +589,7 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
             const due = finishDue(s, entry);
             if (due !== null && due > now) at = Math.min(at, due);
         }
+        if (s.noticeUntil > now) at = Math.min(at, s.noticeUntil);
         if (!Number.isFinite(at)) return;
         s.wake = env.setTimeout(
             () => {
@@ -557,17 +611,37 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
         schedule(s, now);
     }
 
-    /** One gesture is a new widget with the new state at the old one's place, then the old one removed. */
-    async function act(
+    /** The timer an action lands on and what it becomes, or null when the board would not change. */
+    function change(
         s: State,
         id: string,
         actions: TimerAction[]
-    ): Promise<void> {
+    ): { entry: Placed; next: Timer; now: number } | null {
         const entry = s.timers.get(resolve(s, id));
-        if (!entry) return;
+        if (!entry) return null;
         const now = env.now();
         const next = actions.reduce((t, a) => reduce(t, a, now), entry.timer);
-        if (entry.kind === "widget" && sameTimer(next, entry.timer)) return;
+        if (entry.kind === "widget" && sameTimer(next, entry.timer))
+            return null;
+        return { entry, next, now };
+    }
+
+    /**
+     * One gesture is a new widget with the new state at the old one's place,
+     * then the old one removed. `quiet` marks a write no one asked for, the
+     * finished state at zero, which never shows the view-only notice.
+     */
+    async function act(
+        s: State,
+        id: string,
+        actions: TimerAction[],
+        quiet = false
+    ): Promise<void> {
+        if (!change(s, id, actions)) return;
+        if (!(await mayWrite(s, quiet))) return;
+        const changed = change(s, id, actions);
+        if (!changed) return;
+        const { entry, next, now } = changed;
         const [current] = await fetchElements(s, [entry.el], PLACE_PROPERTIES);
         const at = current ? rectOf(current) : null;
         if (!current || !at) {
@@ -595,7 +669,7 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
             req: { elements: [plan.element] },
         });
         if (added.res.error !== undefined) {
-            fail(s, added.res.error.type);
+            refused(s, added.res.error, quiet);
             return;
         }
         s.timers.set(newId, {
@@ -611,6 +685,13 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
             ...stamp(s),
             req: { drawdyElementIds: plan.remove },
         });
+        if (
+            removed.res.error !== undefined &&
+            isReadOnlyRefusal(removed.res.error)
+        ) {
+            await takeBack(s, newId, quiet);
+            return;
+        }
         if (removed.res.error !== undefined) fail(s, removed.res.error.type);
         else {
             forget(s, plan.remove);
@@ -629,6 +710,30 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
                 })
                 .catch(() => undefined);
         }
+    }
+
+    /**
+     * The new widget landed but the old one's removal was refused, so this
+     * person lost edit access mid-press. The new widget goes again only if
+     * removing is allowed; otherwise it stays stacked on the old one as a twin,
+     * which the next press by someone who can edit clears.
+     */
+    async function takeBack(
+        s: State,
+        newId: string,
+        quiet: boolean
+    ): Promise<void> {
+        becameViewOnly(s, quiet);
+        if (!(await checkEdit(s))) return;
+        const res = await s.issueCommand({
+            type: "command:scene:remove-drawdy-elements",
+            ...stamp(s),
+            req: { drawdyElementIds: [newId] },
+        });
+        if (res.res.error !== undefined) return;
+        forget(s, [newId]);
+        s.mine.delete(newId);
+        refresh(s);
     }
 
     /**
@@ -655,16 +760,8 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
         }
     }
 
-    function placeCtx(s: State) {
-        return {
-            issueCommand: s.issueCommand,
-            driverId: s.driverId,
-            nextRequestId: () => String(requestId++),
-            webviewDomId: s.webviewId,
-        };
-    }
-
     async function addTimer(s: State): Promise<void> {
+        if (!(await mayWrite(s, false))) return;
         const { width, height } = WIDGET_SIZE;
         const area = await visibleArea(placeCtx(s));
         const centred = area
@@ -686,7 +783,7 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
             },
         });
         if (added.res.error !== undefined) {
-            fail(s, added.res.error.type);
+            refused(s, added.res.error, false);
             return;
         }
         if (!s.timers.has(id))
@@ -699,6 +796,8 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
     }
 
     async function removeTimer(s: State, id: string): Promise<void> {
+        if (!s.timers.has(resolve(s, id))) return;
+        if (!(await mayWrite(s, false))) return;
         const entry = s.timers.get(resolve(s, id));
         if (!entry) return;
         const stacked = [...s.timers.values()]
@@ -720,7 +819,7 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
             req: { drawdyElementIds: ids },
         });
         if (res.res.error !== undefined) {
-            fail(s, res.res.error.type);
+            refused(s, res.res.error, false);
             return;
         }
         forget(s, ids);
@@ -761,7 +860,10 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
             (e) => e.rect && s.view && overlaps(e.rect, s.view.rect)
         );
         if (inView.length === 0) await addTimer(s);
-        else if (!selectedTimer(s)) s.target = inView.at(-1)!.el;
+        else {
+            await checkEdit(s);
+            if (!selectedTimer(s)) s.target = inView.at(-1)!.el;
+        }
         syncPanel(s, true);
     }
 
@@ -916,6 +1018,8 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
             handled: new Set(),
             wake: null,
             lastPanel: "",
+            canEdit: true,
+            noticeUntil: 0,
         };
         const created = await issueCommand({
             type: "command:dom:create-action-button",
@@ -948,6 +1052,7 @@ export function createTimerDriver(overrides: Partial<Env> = {}): DriverModule {
         await readView(s);
         absorb(s, await fetchElements(s));
         await readSelection(s);
+        s.canEdit = await canEdit(placeCtx(s));
         refresh(s);
     };
 

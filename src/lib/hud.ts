@@ -8,10 +8,12 @@ export const HUD_HEIGHT = 40;
 // Below Drawdy's 64 px top toolbar.
 export const HUD_TOP = 76;
 const MAX_HUD_LABEL = 28;
+export const VIEW_ONLY_NOTICE =
+    "View only: ask for edit access to change timers";
 // Below this many screen pixels across, a widget's digits are too small to read, so the pill stands in.
 export const MIN_READABLE_PX = 120;
 
-export type HudView =
+type TimerHud =
     | {
           kind: "running";
           id: string;
@@ -21,6 +23,8 @@ export type HudView =
           pulse: boolean;
       }
     | { kind: "done"; id: string; label: string };
+
+export type HudView = TimerHud | { kind: "notice" };
 
 export type Theme = "light" | "dark";
 
@@ -49,7 +53,7 @@ export function pickHud(
     timers: Iterable<Timer>,
     now: number,
     flashes: ReadonlyMap<string, number>
-): HudView | null {
+): TimerHud | null {
     let flash: { timer: Timer; until: number } | null = null;
     let running: Timer | null = null;
     for (const timer of timers) {
@@ -110,6 +114,7 @@ export function hudPosition(windowWidth: number): { x: number; y: number } {
 
 const ICON_PATHS = {
     timer: "M17.6177 5.9681L19.0711 4.51472L20.4853 5.92893L19.0319 7.38231C20.2635 8.92199 21 10.875 21 13C21 17.9706 16.9706 22 12 22C7.02944 22 3 17.9706 3 13C3 8.02944 7.02944 4 12 4C14.125 4 16.078 4.73647 17.6177 5.9681ZM12 20C15.866 20 19 16.866 19 13C19 9.13401 15.866 6 12 6C8.13401 6 5 9.13401 5 13C5 16.866 8.13401 20 12 20ZM11 8H13V14H11V8ZM8 1H16V3H8V1Z",
+    eye: "M12.0003 3C17.3924 3 21.8784 6.87976 22.8189 12C21.8784 17.1202 17.3924 21 12.0003 21C6.60812 21 2.12215 17.1202 1.18164 12C2.12215 6.87976 6.60812 3 12.0003 3ZM12.0003 19C16.2359 19 19.8603 16.052 20.7777 12C19.8603 7.94803 16.2359 5 12.0003 5C7.7646 5 4.14022 7.94803 3.22278 12C4.14022 16.052 7.7646 19 12.0003 19ZM12.0003 16.5C9.51498 16.5 7.50026 14.4853 7.50026 12C7.50026 9.51472 9.51498 7.5 12.0003 7.5C14.4855 7.5 16.5003 9.51472 16.5003 12C16.5003 14.4853 14.4855 16.5 12.0003 16.5ZM12.0003 14.5C13.381 14.5 14.5003 13.3807 14.5003 12C14.5003 10.6193 13.381 9.5 12.0003 9.5C10.6196 9.5 9.50026 10.6193 9.50026 12C9.50026 13.3807 10.6196 14.5 12.0003 14.5Z",
     check: "M9.9997 15.1709L19.1921 5.97852L20.6063 7.39273L9.9997 17.9993L3.63574 11.6354L5.04996 10.2212L9.9997 15.1709Z",
 } as const;
 
@@ -203,26 +208,48 @@ export function hudSchema(
     driverId: string
 ): DomElementSchema {
     const content: DomElementSchema[] =
-        view.kind === "done"
+        view.kind === "notice"
             ? [
-                  iconSchema(ICON_PATHS.check, theme),
+                  iconSchema(ICON_PATHS.eye, theme),
                   {
                       type: "text",
-                      domId: `${driverId}:hud-done`,
-                      child: "Time's up",
+                      domId: `${driverId}:hud-notice`,
+                      child: VIEW_ONLY_NOTICE,
                       styles: {
-                          fontSize: [14, "px"],
-                          fontWeight: "semibold",
+                          fontSize: [13, "px"],
+                          fontWeight: "medium",
                           color: TEXT,
                       },
                   },
               ]
-            : [
-                  iconSchema(ICON_PATHS.timer, theme),
-                  timeSchema(driverId, view.time, view.urgent ? WARNING : TEXT),
-              ];
+            : view.kind === "done"
+              ? [
+                    iconSchema(ICON_PATHS.check, theme),
+                    {
+                        type: "text",
+                        domId: `${driverId}:hud-done`,
+                        child: "Time's up",
+                        styles: {
+                            fontSize: [14, "px"],
+                            fontWeight: "semibold",
+                            color: TEXT,
+                        },
+                    },
+                ]
+              : [
+                    iconSchema(ICON_PATHS.timer, theme),
+                    timeSchema(
+                        driverId,
+                        view.time,
+                        view.urgent ? WARNING : TEXT
+                    ),
+                ];
     const fill =
-        view.kind === "done" ? DONE_FILL : view.pulse ? PULSE_FILL : PANEL;
+        view.kind === "done"
+            ? DONE_FILL
+            : view.kind === "running" && view.pulse
+              ? PULSE_FILL
+              : PANEL;
     return {
         type: "row",
         domId: `${driverId}:hud`,
@@ -250,7 +277,10 @@ export function hudSchema(
                 children: [
                     spacer(4),
                     ...content,
-                    ...labelSchema(driverId, view.label),
+                    ...labelSchema(
+                        driverId,
+                        view.kind === "notice" ? "" : view.label
+                    ),
                     spacer(6),
                 ],
             },

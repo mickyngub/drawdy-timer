@@ -29,6 +29,7 @@ export type DriverToWebview =
           timer: Timer | null;
           count: number;
           sound: Sound;
+          viewOnly: boolean;
       }
     | { type: "chime"; sound: Exclude<Sound, "off"> }
     | { type: "error"; reason: PanelError };

@@ -40,6 +40,13 @@ const sounds = (
 const BODY = `
 <main id="panel" class="group/panel flex min-h-0 flex-1 flex-col" data-view="empty" data-audio="locked">
     <div class="${SCROLL}">
+        <section id="view-only" role="note" class="hidden items-start gap-2.5 rounded-xl bg-section px-3 py-2.5 group-data-view-only/panel:flex">
+            ${icon(ICONS.eye, "mt-px size-4 shrink-0 text-fg-subtle")}
+            <div class="flex flex-col gap-0.5">
+                <span class="text-label text-fg">View only</span>
+                <span class="text-body text-fg-subtle">You can watch timers tick here. Ask for edit access to change them.</span>
+            </div>
+        </section>
         <section id="empty" class="${EMPTY} group-data-[view=timer]/panel:hidden">
             ${icon(ICONS.timer, "size-5 text-fg-subtle")}
             <span class="text-label text-fg">No timer on this board</span>

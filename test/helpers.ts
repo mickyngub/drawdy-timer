@@ -237,10 +237,11 @@ export const textOf = (schema: DomElementSchema | null): string =>
             ? (schema.children ?? []).map(textOf).join("")
             : "";
 
-/** What the floating pill shows: "running", "done", or null when there is no pill. */
-export function hudKind(host: FakeHost): "running" | "done" | null {
+/** What the floating pill shows: "running", "done", the view-only "notice", or null when there is no pill. */
+export function hudKind(host: FakeHost): "running" | "done" | "notice" | null {
     const hud = host.floating.get(HUD_ID);
     if (!hud) return null;
+    if (findSchema(hud.schema, `${DRIVER_ID}:hud-notice`)) return "notice";
     if (findSchema(hud.schema, `${DRIVER_ID}:hud-done`)) return "done";
     return findSchema(hud.schema, `${DRIVER_ID}:hud-time`) ? "running" : null;
 }

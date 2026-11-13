@@ -146,8 +146,28 @@ export function fakeBoard() {
 
 export type FakeBoard = ReturnType<typeof fakeBoard>;
 
+/** What check-can-edit answers: yes, no (a view-only board), or an error, as hosts before the view-only guard do. */
+export type EditAccess = boolean | "unsupported";
+
+// The commands Drawdy refuses on a view-only board (drawdy PR #113).
+const BOARD_WRITES = new Set([
+    "command:scene:add-drawdy-elements",
+    "command:scene:remove-drawdy-elements",
+    "command:scene:update-drawdy-elements",
+    "command:scene:update-text-edit",
+    "command:tools:emulate-pointer",
+    "command:history:undo",
+    "command:history:redo",
+]);
+
+const isBoardWrite = (cmd: { type: string; req?: any }) =>
+    BOARD_WRITES.has(cmd.type) ||
+    (cmd.type === "command:scene:end-preview" &&
+        (cmd.req?.commits?.length ?? 0) > 0);
+
 type Options = {
     board?: FakeBoard;
+    canEdit?: EditAccess;
     viewport?: Rect;
     zoom?: number;
     window?: { width: number; height: number };
@@ -216,6 +236,8 @@ export function fakeHost(options: Options = {}) {
     let selection: string[] = [];
     let webview = false;
     let ids = 0;
+    let access: EditAccess = options.canEdit ?? true;
+    const after: { type: string; fn: () => void }[] = [];
 
     const client: Client = {
         replica: new Map(),
@@ -246,8 +268,7 @@ export function fakeHost(options: Options = {}) {
     const element = (id: string): Stored | null =>
         client.replica.get(id)?.el ?? null;
 
-    const issueCommand = (async (cmd: any) => {
-        sent.push({ type: cmd.type, req: cmd.req });
+    const answer = async (cmd: any) => {
         const ok = (value?: unknown) => ({ ...cmd, res: { value } });
         const fail = (type: string, message?: string) => ({
             ...cmd,
@@ -255,8 +276,23 @@ export function fakeHost(options: Options = {}) {
         });
         if (options.denied?.some((prefix) => cmd.type.startsWith(prefix)))
             return fail("unauthorized");
+        if (access === false && isBoardWrite(cmd))
+            return {
+                ...cmd,
+                res: {
+                    error: {
+                        type: "unauthorized",
+                        message: `This board is view-only for you, so ${cmd.type} was refused.`,
+                        body: { reason: "read-only", commandType: cmd.type },
+                    },
+                },
+            };
         const req = cmd.req;
         switch (cmd.type) {
+            case "command:auth:check-can-edit":
+                return access === "unsupported"
+                    ? fail("unauthorized", `not allowed to use ${cmd.type}`)
+                    : ok({ canEdit: access });
             case "command:dom:create-action-button":
                 return ok({ created: true });
             case "command:webview:create": {
@@ -385,6 +421,14 @@ export function fakeHost(options: Options = {}) {
                         : {}
                 );
         }
+    };
+
+    const issueCommand = (async (cmd: any) => {
+        sent.push({ type: cmd.type, req: cmd.req });
+        const res = await answer(cmd);
+        const hook = after.findIndex((h) => h.type === cmd.type);
+        if (hook >= 0) after.splice(hook, 1)[0].fn();
+        return res;
     }) as unknown as DriverCommandIssuer;
 
     function select(next: string[]) {
@@ -494,6 +538,14 @@ export function fakeHost(options: Options = {}) {
         /** Undo puts the element back the way it was, as one whole-element write. */
         restore(snapshot: Stored) {
             board.write(client, snapshot.id, structuredClone(snapshot));
+        },
+        /** Changes this person's role: what check-can-edit answers, and whether board writes are refused. */
+        setCanEdit(next: EditAccess) {
+            access = next;
+        },
+        /** Runs `fn` once, right after the host answers the next command of this type, to change a role mid-action. */
+        afterNext(type: string, fn: () => void) {
+            after.push({ type, fn });
         },
         types: () => sent.map((s) => s.type),
         clear() {

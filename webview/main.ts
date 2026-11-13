@@ -1,7 +1,10 @@
 import type { DrawdyWebviewApi } from "@drawdy/driver-protocol";
 import {
+    panelControls,
     panelModel,
     PRIMARY_LABEL,
+    type ControlState,
+    type PanelControl,
     type PrimaryAction,
 } from "../src/lib/panel-model";
 import { clampMinutes, cleanLabel, type Timer } from "../src/lib/timer-state";
@@ -47,10 +50,22 @@ const presetButtons = [
 const soundButtons = [
     ...document.querySelectorAll<HTMLButtonElement>("[data-sound]"),
 ];
+const controls: Record<PanelControl, (HTMLButtonElement | HTMLInputElement)[]> =
+    {
+        primary: [primary],
+        add: [$<HTMLButtonElement>("add")],
+        delete: [$<HTMLButtonElement>("delete")],
+        "add-minute": [addMinute],
+        reset: [reset],
+        length: [...presetButtons, custom],
+        label: [labelInput],
+        sound: soundButtons,
+    };
 
 let timer: Timer | null = null;
 let count = 0;
 let sound: Sound = "soft";
+let viewOnly = false;
 let ticker: ReturnType<typeof setInterval> | null = null;
 let noticeTimer: ReturnType<typeof setTimeout> | null = null;
 let audio: AudioContext | null = null;
@@ -116,36 +131,46 @@ function setPrimary(action: PrimaryAction): void {
               : icon(ICONS.play);
 }
 
+/** A view-only control stays focusable and clickable, so the driver can say why it did nothing. */
+function setControl(
+    el: HTMLButtonElement | HTMLInputElement,
+    state: ControlState
+): void {
+    el.disabled = state === "off";
+    if (state === "view-only") el.setAttribute("aria-disabled", "true");
+    else el.removeAttribute("aria-disabled");
+    if (el instanceof HTMLInputElement) el.readOnly = state === "view-only";
+}
+
 function render(): void {
-    const model = panelModel(timer, Date.now());
+    const model = panelModel(timer, Date.now(), { viewOnly });
     panel.dataset.view = model.view;
+    panel.toggleAttribute("data-view-only", model.viewOnly);
+    const states = panelControls(model);
+    for (const [name, elements] of Object.entries(controls))
+        for (const el of elements) setControl(el, states[name as PanelControl]);
     if (model.state) panel.dataset.state = model.state;
     else delete panel.dataset.state;
     display.textContent = model.display;
     display.toggleAttribute("data-urgent", model.urgent);
     status.textContent = model.status;
     setPrimary(model.primary);
-    reset.disabled = !model.canReset;
     many.hidden = count < 2;
     many.textContent = `${count} timers on this board. Select one to control it here.`;
 
-    for (const button of presetButtons) {
+    for (const button of presetButtons)
         button.setAttribute(
             "aria-pressed",
             String(Number(button.dataset.minutes) === model.preset)
         );
-        button.disabled = model.lengthLocked;
-    }
-    custom.disabled = model.lengthLocked;
     custom.toggleAttribute(
         "data-active",
         model.view === "timer" && model.preset === null
     );
     if (document.activeElement !== custom)
         custom.value = model.preset === null ? String(model.minutes) : "";
-    $<HTMLElement>("length-hint").textContent = model.lengthLocked
-        ? "Reset to change"
-        : "minutes";
+    $<HTMLElement>("length-hint").textContent =
+        model.lengthLocked && !model.viewOnly ? "Reset to change" : "minutes";
     if (document.activeElement !== labelInput) labelInput.value = model.label;
 
     for (const button of soundButtons)
@@ -245,6 +270,7 @@ api.onMessage((raw) => {
             timer = message.timer;
             count = message.count;
             sound = message.sound;
+            viewOnly = message.viewOnly === true;
             render();
             return;
         case "chime":
